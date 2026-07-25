@@ -1,4 +1,5 @@
 import { BufferGeometry, Float32BufferAttribute, Vector3 } from 'three';
+import { barycentricToVector, readVertex } from './geometryUtils.js';
 
 const v0 = new Vector3();
 const v1 = new Vector3();
@@ -54,22 +55,3 @@ export function buildPatternGeometry(connections, geometry) {
   patternGeometry.setAttribute('position', new Float32BufferAttribute(buffer, 3));
   return patternGeometry;
 }
-
-function readVertex(index, target, positionsArray) {
-  const offset = index * 3;
-  target.set(
-    positionsArray[offset],
-    positionsArray[offset + 1],
-    positionsArray[offset + 2],
-  );
-  return target;
-}
-
-function barycentricToVector(bary, a, b, c, target) {
-  target.set(0, 0, 0);
-  target.addScaledVector(a, bary.a);
-  target.addScaledVector(b, bary.b);
-  target.addScaledVector(c, bary.c);
-  return target;
-}
-

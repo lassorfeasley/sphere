@@ -178,7 +178,25 @@ body {
 #triangle-preview {
   width: 100%;
   height: auto;
-  aspect-ratio: 1 / 0.866;
+  aspect-ratio: 2.1 / 1.85;
+}
+
+.mirror-toggle {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+}
+
+.mirror-toggle input[type='checkbox'] {
+  accent-color: #8ae5ff;
+  margin: 0;
+  cursor: pointer;
+}
+
+.template-toolbar button:hover {
+  border-color: rgba(138, 229, 255, 0.6);
+  color: #b4f0ff;
 }
 
 .template-toolbar span {

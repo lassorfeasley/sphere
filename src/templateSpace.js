@@ -6,7 +6,6 @@ export const templateTriangle = [
   { x: 1, y: TRI_HEIGHT },
 ];
 
-export const EDGE_POINTS_PER_SIDE = 5;
 export const TESSELLATIONS = {
   triforce: 'Tri Fan',
   striped: 'Striped',
@@ -65,76 +64,14 @@ export function clampBarycentric(bary) {
   };
 }
 
-export function clampPointToTriangle(point) {
-  const bary = clampBarycentric(cartesianToBarycentric(point));
-  return {
-    cartesian: barycentricToCartesian(bary),
-    bary,
-  };
-}
-
-export function createEdgePointData(pointsPerSide = EDGE_POINTS_PER_SIDE) {
-  const edges = [
-    { name: 'AB', start: 0, end: 1 },
-    { name: 'BC', start: 1, end: 2 },
-    { name: 'CA', start: 2, end: 0 },
-  ];
-
-  const uniquePoints = new Map();
-  const points = [];
-  const edgeBuckets = edges.map(() => []);
-  const segments = pointsPerSide - 1;
-
-  edges.forEach((edge, edgeIndex) => {
-    const startVertex = templateTriangle[edge.start];
-    const endVertex = templateTriangle[edge.end];
-
-    for (let i = 0; i < pointsPerSide; i += 1) {
-      const t = segments === 0 ? 0 : i / segments;
-      const cartesian = {
-        x: startVertex.x * (1 - t) + endVertex.x * t,
-        y: startVertex.y * (1 - t) + endVertex.y * t,
-      };
-      const bary = toEdgeBarycentric(edgeIndex, t);
-      const key = baryKey(bary);
-
-      if (!uniquePoints.has(key)) {
-        const pointData = {
-          id: `edge-${edge.name}-${i}`,
-          edge: edgeIndex,
-          index: i,
-          bary,
-          cartesian,
-        };
-        uniquePoints.set(key, pointData);
-        points.push(pointData);
-      }
-
-      const pointRef = uniquePoints.get(key);
-      edgeBuckets[edgeIndex].push(pointRef);
-    }
-  });
-
-  return {
-    points,
-    edges: edgeBuckets,
-  };
-}
-
-function toEdgeBarycentric(edgeIndex, t) {
-  switch (edgeIndex) {
-    case 0: // AB
-      return { a: 1 - t, b: t, c: 0 };
-    case 1: // BC
-      return { a: 0, b: 1 - t, c: t };
-    case 2: // CA
-    default:
-      return { a: t, b: 0, c: 1 - t };
-  }
-}
-
-function baryKey(bary) {
-  return `${bary.a.toFixed(4)}_${bary.b.toFixed(4)}_${bary.c.toFixed(4)}`;
+/**
+ * Reflect a barycentric point across the triangle's vertical altitude
+ * (through vertex A). Combined with the 3-fold symmetry of the quad fan,
+ * this produces full dihedral (D3) symmetry, which guarantees the pattern
+ * lines up across shared edges of adjacent mesh faces.
+ */
+export function mirrorBarycentric(bary) {
+  return { a: bary.a, b: bary.c, c: bary.b };
 }
 
 export function getTessellationQuads(type = 'triforce') {
@@ -240,4 +177,3 @@ function lerpBary(b1, b2, t) {
     c: b1.c * (1 - t) + b2.c * t,
   };
 }
-
