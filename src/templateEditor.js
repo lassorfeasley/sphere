@@ -1,265 +1,582 @@
 import {
+  GRID_SIZES,
+  PRESETS,
+  SYMMETRIES,
   barycentricToCartesian,
-  getTessellationOptions,
-  getTessellationQuads,
-  mirrorBarycentric,
-  quadUvToBarycentric,
+  expandStrokes,
+  junctionParams,
+  latticePoints,
+  lerpBary,
+  samePoint,
+  segmentIntersections,
   templateTriangle,
 } from './templateSpace.js';
 
-const DEFAULT_TESSELLATION = 'triforce';
-const STORAGE_KEY = 'sphere-template-v1';
+const STORAGE_KEY = 'sphere-template-v2';
 const SVG_NS = 'http://www.w3.org/2000/svg';
-
-// Preview viewBox is sized to fit the template triangle plus the three
-// mirrored ghost neighbors that visualize continuity across face edges.
-const PREVIEW_VIEWBOX = '-0.55 -0.05 2.1 1.85';
+const EDITOR_VIEWBOX = '-0.06 -0.06 1.12 0.99';
+// Fits the template triangle plus its three mirrored neighbors.
+const NEIGHBOR_VIEWBOX = '-0.55 -0.05 2.1 1.85';
+const SNAP_RADIUS = 0.045;
+// On dense grids the snap radius shrinks so the stretch of line between
+// neighboring dots stays clickable.
+const SNAP_FRACTION_OF_SPACING = 0.3;
+const LINE_HIT_RADIUS = 0.02;
 
 export class TemplateEditor {
-  constructor(rootEl, { onChange } = {}) {
+  constructor(rootEl, { onChange, onPreset, onSelect } = {}) {
     this.rootEl = rootEl;
     this.onChange = onChange;
+    this.onPreset = onPreset;
+    this.onSelect = onSelect;
     this.state = {
-      tessellation: DEFAULT_TESSELLATION,
-      mirror: true,
-      quadSegments: [],
+      symmetry: 'kaleidoscope',
+      grid: 6,
+      strokes: [],
     };
+    this.pending = null;
+    this.dragStart = null;
+    this.hover = null;
+    this.cursor = null;
+    this.selected = null;
+    this.lineColors = null;
+    this.mode = 'draw';
+    this.lineWidth = 0;
+    this.history = [];
 
     this.buildUI();
-    this.setupPreview();
-
-    this.quadEditor = new QuadEditor(this.quadEditorRoot, {
-      onChange: (segments) => {
-        this.state.quadSegments = segments;
-        this.updatePreview();
-        this.emitChange();
-      },
-    });
-
-    this.undoButton.addEventListener('click', () => this.quadEditor.undo());
-    this.clearButton.addEventListener('click', () => this.quadEditor.clear());
-    this.saveButton.addEventListener('click', () => this.exportJson());
-    this.loadButton.addEventListener('click', () => this.fileInput.click());
-    this.fileInput.addEventListener('change', () => this.importJsonFile());
-
     this.restoreFromStorage();
+    this.syncControls();
+    this.refresh();
+    this.setMode('draw');
 
-    this.updatePreview();
-    this.emitChange();
+    window.addEventListener('keydown', (event) => this.handleKeyDown(event));
   }
 
   buildUI() {
-    const toolbar = document.createElement('div');
-    toolbar.className = 'template-toolbar';
+    const controls = document.createElement('div');
+    controls.className = 'template-toolbar';
 
-    const tessLabel = document.createElement('label');
-    tessLabel.textContent = 'Tessellation';
-    this.tessSelect = document.createElement('select');
-    getTessellationOptions().forEach(({ value, label }) => {
-      const option = document.createElement('option');
-      option.value = value;
-      option.textContent = label;
-      this.tessSelect.appendChild(option);
+    this.symmetrySelect = makeSelect(
+      Object.entries(SYMMETRIES).map(([value, { label }]) => ({ value, label })),
+    );
+    this.symmetrySelect.addEventListener('change', () => {
+      this.pushHistory();
+      this.state.symmetry = this.symmetrySelect.value;
+      this.refresh();
     });
-    this.tessSelect.value = DEFAULT_TESSELLATION;
-    this.tessSelect.addEventListener('change', () => {
-      this.state.tessellation = this.tessSelect.value;
-      this.updatePreview();
-      this.emitChange();
+
+    this.gridSelect = makeSelect(GRID_SIZES.map((n) => ({ value: String(n), label: `${n} per edge` })));
+    this.gridSelect.addEventListener('change', () => {
+      this.state.grid = Number(this.gridSelect.value);
+      this.refresh(false);
     });
-    tessLabel.appendChild(this.tessSelect);
 
-    const mirrorLabel = document.createElement('label');
-    mirrorLabel.className = 'mirror-toggle';
-    this.mirrorCheckbox = document.createElement('input');
-    this.mirrorCheckbox.type = 'checkbox';
-    this.mirrorCheckbox.checked = this.state.mirror;
-    this.mirrorCheckbox.addEventListener('change', () => {
-      this.state.mirror = this.mirrorCheckbox.checked;
-      this.updatePreview();
-      this.emitChange();
+    controls.append(labelled('Symmetry', this.symmetrySelect), labelled('Grid', this.gridSelect));
+
+    const presets = document.createElement('div');
+    presets.className = 'template-toolbar';
+    const presetsTitle = document.createElement('span');
+    presetsTitle.textContent = 'Start from';
+    presets.appendChild(presetsTitle);
+    Object.entries(PRESETS).forEach(([key, preset]) => {
+      presets.appendChild(makeButton(preset.label, () => this.applyPreset(key)));
     });
-    mirrorLabel.append(this.mirrorCheckbox, document.createTextNode('Mirror'));
-    mirrorLabel.title =
-      'Adds a mirrored copy of every stroke. Mirrored patterns are guaranteed to connect across face edges.';
 
-    this.undoButton = this.makeButton('Undo');
-    this.clearButton = this.makeButton('Clear');
-    this.saveButton = this.makeButton('Save');
-    this.loadButton = this.makeButton('Load');
-
+    const actions = document.createElement('div');
+    actions.className = 'template-toolbar';
     this.fileInput = document.createElement('input');
     this.fileInput.type = 'file';
     this.fileInput.accept = 'application/json,.json';
     this.fileInput.style.display = 'none';
-
-    toolbar.append(
-      tessLabel,
-      mirrorLabel,
-      this.undoButton,
-      this.clearButton,
-      this.saveButton,
-      this.loadButton,
+    this.fileInput.addEventListener('change', () => this.importJsonFile());
+    this.drawButton = makeButton('Draw', () => this.setMode('draw'));
+    this.selectButton = makeButton('Select', () => this.setMode('select'));
+    this.drawButton.title = 'Draw lines between dots (D)';
+    this.selectButton.title = 'Select lines to delete them (V, or hold Option while clicking)';
+    actions.append(
+      this.drawButton,
+      this.selectButton,
+      makeButton('Undo', () => this.undo()),
+      makeButton('Clear', () => this.clear()),
+      makeButton('Save', () => this.exportJson()),
+      makeButton('Load', () => this.fileInput.click()),
       this.fileInput,
     );
 
-    const layout = document.createElement('div');
-    layout.className = 'template-layout';
+    const hint = document.createElement('p');
+    hint.className = 'template-hint';
+    hint.textContent =
+      'Draw: drag between dots, or click dots one after another to chain lines (Esc stops). ' +
+      'Select (V, or hold Option): click a line to select the part between junctions, ' +
+      'click again for the whole line, then press Delete.';
 
-    this.quadEditorRoot = document.createElement('div');
-    this.quadEditorRoot.id = 'quad-editor-root';
-
-    this.previewRoot = document.createElement('div');
-    this.previewRoot.id = 'triangle-preview-root';
-
-    layout.append(this.quadEditorRoot, this.previewRoot);
-    this.rootEl.append(toolbar, layout);
-  }
-
-  setupPreview() {
-    this.previewSvg = document.createElementNS(SVG_NS, 'svg');
-    this.previewSvg.setAttribute('viewBox', PREVIEW_VIEWBOX);
-    this.previewSvg.setAttribute('id', 'triangle-preview');
-
-    this.ghostLayer = document.createElementNS(SVG_NS, 'g');
-
-    const outline = document.createElementNS(SVG_NS, 'polygon');
-    outline.setAttribute('points', templateTriangle.map(({ x, y }) => `${x},${y}`).join(' '));
-    outline.setAttribute('fill', 'rgba(255,255,255,0.01)');
-    outline.setAttribute('stroke', 'rgba(255,255,255,0.18)');
-    outline.setAttribute('stroke-width', '0.005');
-
-    this.quadLayer = document.createElementNS(SVG_NS, 'g');
-    this.patternLayer = document.createElementNS(SVG_NS, 'g');
-
-    this.previewSvg.append(this.ghostLayer, outline, this.quadLayer, this.patternLayer);
-    this.previewRoot.appendChild(this.previewSvg);
-  }
-
-  updatePreview() {
-    const quads = getTessellationQuads(this.state.tessellation);
-    this.quadLayer.innerHTML = '';
-    quads.forEach((quad) => {
-      const polygon = document.createElementNS(SVG_NS, 'polygon');
-      polygon.setAttribute(
-        'points',
-        quad.corners.map(({ cartesian }) => `${cartesian.x},${cartesian.y}`).join(' '),
-      );
-      polygon.setAttribute('fill', 'rgba(157, 222, 255, 0.05)');
-      polygon.setAttribute('stroke', 'rgba(255, 255, 255, 0.1)');
-      polygon.setAttribute('stroke-width', '0.004');
-      this.quadLayer.appendChild(polygon);
+    this.editorSvg = svgEl('svg', { viewBox: EDITOR_VIEWBOX, id: 'triangle-editor' });
+    this.gridLayer = svgEl('g');
+    this.axisLayer = svgEl('g');
+    this.segmentLayer = svgEl('g');
+    this.snapLayer = svgEl('g');
+    this.rubberBand = svgEl('line', { class: 'rubber-band' });
+    this.editorSvg.append(
+      svgEl('polygon', { points: trianglePoints(templateTriangle), class: 'template-outline' }),
+      this.gridLayer,
+      this.axisLayer,
+      this.segmentLayer,
+      this.rubberBand,
+      this.snapLayer,
+    );
+    this.editorSvg.addEventListener('pointerdown', (event) => this.handlePointerDown(event));
+    this.editorSvg.addEventListener('pointermove', (event) => this.handlePointerMove(event));
+    this.editorSvg.addEventListener('pointerup', (event) => this.handlePointerUp(event));
+    this.editorSvg.addEventListener('pointerleave', () => {
+      this.hover = null;
+      this.cursor = null;
+      this.renderInteraction();
     });
 
-    const connections = this.buildTriangleConnections();
+    const neighborTitle = document.createElement('span');
+    neighborTitle.className = 'template-subtitle';
+    neighborTitle.textContent = 'With neighboring faces';
+    this.neighborSvg = svgEl('svg', { viewBox: NEIGHBOR_VIEWBOX, id: 'neighbor-preview' });
+    this.neighborWarning = document.createElement('p');
+    this.neighborWarning.className = 'template-warning';
+    this.neighborWarning.textContent =
+      'Without kaleidoscope symmetry, faces on the sphere can be rotated relative to each other, ' +
+      'so lines may not meet at the edges the way this preview shows.';
 
-    this.patternLayer.innerHTML = '';
-    connections.forEach((segment) => {
-      const start = barycentricToCartesian(segment.start);
-      const end = barycentricToCartesian(segment.end);
-      this.patternLayer.appendChild(makeSvgLine(start, end, '#fef4b4', 0.005));
-    });
+    this.connectivityNote = document.createElement('p');
+    this.connectivityNote.className = 'template-connectivity';
+    this.clearanceNote = document.createElement('p');
+    this.clearanceNote.className = 'template-connectivity';
 
-    this.renderGhosts(connections);
+    this.rootEl.append(
+      controls,
+      presets,
+      actions,
+      hint,
+      this.editorSvg,
+      this.connectivityNote,
+      this.clearanceNote,
+      neighborTitle,
+      this.neighborSvg,
+      this.neighborWarning,
+    );
   }
 
-  /**
-   * Draw mirrored copies of the pattern across each triangle edge — this is
-   * what the pattern looks like on the three adjacent faces of the mesh, so
-   * strokes that meet a ghost stroke at the edge will flow continuously on
-   * the sphere.
-   */
-  renderGhosts(connections) {
-    this.ghostLayer.innerHTML = '';
+  syncControls() {
+    this.symmetrySelect.value = this.state.symmetry;
+    this.gridSelect.value = String(this.state.grid);
+  }
+
+  /** Recompute derived geometry and redraw; optionally notify the sphere. */
+  refresh(emit = true) {
+    this.segments = expandStrokes(this.state.strokes, this.state.symmetry);
+    this.snapTargets = this.computeSnapTargets();
+    this.renderGrid();
+    this.renderAxes();
+    this.renderSegments();
+    this.renderInteraction();
+    this.renderNeighbors();
+    this.neighborWarning.hidden = this.state.symmetry === 'kaleidoscope';
+    if (emit) {
+      this.emitChange();
+    }
+  }
+
+  computeSnapTargets() {
+    const targets = latticePoints(this.state.grid).map((p) => ({ p, kind: 'grid' }));
+    const add = (p, kind) => {
+      if (!targets.some((t) => samePoint(t.p, p))) {
+        targets.push({ p, kind });
+      }
+    };
+    this.segments.forEach(({ start, end }) => {
+      add(start, 'endpoint');
+      add(end, 'endpoint');
+    });
+    segmentIntersections(this.segments).forEach((p) => add(p, 'crossing'));
+    return targets;
+  }
+
+  renderGrid() {
+    this.gridLayer.innerHTML = '';
+    const n = this.state.grid;
+    for (let i = 1; i < n; i += 1) {
+      const t = i / n;
+      // One family of lattice lines parallel to each triangle edge.
+      [
+        [{ a: t, b: 1 - t, c: 0 }, { a: t, b: 0, c: 1 - t }],
+        [{ a: 1 - t, b: t, c: 0 }, { a: 0, b: t, c: 1 - t }],
+        [{ a: 1 - t, b: 0, c: t }, { a: 0, b: 1 - t, c: t }],
+      ].forEach(([p, q]) => {
+        this.gridLayer.appendChild(baryLine(p, q, 'grid-line'));
+      });
+    }
+  }
+
+  renderAxes() {
+    this.axisLayer.innerHTML = '';
+    if (this.state.symmetry !== 'kaleidoscope') {
+      return;
+    }
+    [
+      [{ a: 1, b: 0, c: 0 }, { a: 0, b: 0.5, c: 0.5 }],
+      [{ a: 0, b: 1, c: 0 }, { a: 0.5, b: 0, c: 0.5 }],
+      [{ a: 0, b: 0, c: 1 }, { a: 0.5, b: 0.5, c: 0 }],
+    ].forEach(([p, q]) => this.axisLayer.appendChild(baryLine(p, q, 'mirror-axis')));
+  }
+
+  renderSegments() {
+    this.segmentLayer.innerHTML = '';
+    this.segments.forEach(({ start, end }, i) => {
+      const line = baryLine(start, end, 'pattern-line');
+      if (this.lineColors?.[i]) {
+        line.style.stroke = this.lineColors[i];
+      }
+      this.segmentLayer.appendChild(line);
+    });
+    // Symmetric copies share the source stroke's parameterization, so the
+    // selected span maps onto every copy at the same positions.
+    const selection = this.selected;
+    const spans = selection
+      ? this.segments
+          .filter(({ source }) => source === selection.source)
+          .map(({ start, end }) => ({
+            start: lerpBary(start, end, selection.t0),
+            end: lerpBary(start, end, selection.t1),
+          }))
+      : [];
+    spans.forEach(({ start, end }) => {
+      this.segmentLayer.appendChild(baryLine(start, end, 'pattern-line selected'));
+    });
+    if (typeof this.onSelect === 'function') {
+      this.onSelect(spans);
+    }
+  }
+
+  renderInteraction() {
+    this.snapLayer.innerHTML = '';
+    this.snapTargets.forEach(({ p, kind }) => {
+      const { x, y } = barycentricToCartesian(p);
+      const dot = svgEl('circle', { cx: x, cy: y, r: kind === 'grid' ? 0.009 : 0.008, class: `snap-dot ${kind}` });
+      if (this.hover && samePoint(p, this.hover)) {
+        dot.classList.add('hover');
+      }
+      if (this.anchor() && samePoint(p, this.anchor())) {
+        dot.classList.add('active');
+      }
+      this.snapLayer.appendChild(dot);
+    });
+
+    const from = this.anchor();
+    const to = this.hover ? barycentricToCartesian(this.hover) : this.cursor;
+    if (from && to) {
+      const start = barycentricToCartesian(from);
+      setAttrs(this.rubberBand, { x1: start.x, y1: start.y, x2: to.x, y2: to.y, visibility: 'visible' });
+    } else {
+      setAttrs(this.rubberBand, { visibility: 'hidden' });
+    }
+    this.editorSvg.style.cursor = this.hover ? 'crosshair' : this.mode === 'select' ? 'pointer' : 'default';
+  }
+
+  /** Draw the pattern mirrored across each edge, as it appears on adjacent faces. */
+  renderNeighbors() {
+    this.neighborSvg.innerHTML = '';
     const [a, b, c] = templateTriangle;
-    const edges = [
+    [
       [a, b],
       [b, c],
       [c, a],
-    ];
-
-    edges.forEach(([p1, p2]) => {
-      const ghostOutline = document.createElementNS(SVG_NS, 'polygon');
-      ghostOutline.setAttribute(
-        'points',
-        templateTriangle
-          .map((vertex) => {
-            const r = reflectAcrossLine(vertex, p1, p2);
-            return `${r.x},${r.y}`;
-          })
-          .join(' '),
+    ].forEach(([p1, p2]) => {
+      const reflect = (point) => reflectAcrossLine(point, p1, p2);
+      this.neighborSvg.appendChild(
+        svgEl('polygon', { points: trianglePoints(templateTriangle.map(reflect)), class: 'neighbor-outline' }),
       );
-      ghostOutline.setAttribute('fill', 'none');
-      ghostOutline.setAttribute('stroke', 'rgba(255,255,255,0.07)');
-      ghostOutline.setAttribute('stroke-width', '0.004');
-      this.ghostLayer.appendChild(ghostOutline);
-
-      connections.forEach((segment) => {
-        const start = reflectAcrossLine(barycentricToCartesian(segment.start), p1, p2);
-        const end = reflectAcrossLine(barycentricToCartesian(segment.end), p1, p2);
-        this.ghostLayer.appendChild(makeSvgLine(start, end, 'rgba(254, 244, 180, 0.22)', 0.004));
+      this.segments.forEach(({ start, end }) => {
+        this.neighborSvg.appendChild(
+          cartLine(reflect(barycentricToCartesian(start)), reflect(barycentricToCartesian(end)), 'neighbor-line'),
+        );
       });
+    });
+    this.neighborSvg.appendChild(
+      svgEl('polygon', { points: trianglePoints(templateTriangle), class: 'template-outline' }),
+    );
+    this.segments.forEach(({ start, end }) => {
+      this.neighborSvg.appendChild(baryLine(start, end, 'pattern-line'));
     });
   }
 
-  buildTriangleConnections() {
-    const segments = this.state.quadSegments;
-    if (!segments.length) {
-      return [];
-    }
-    const quads = getTessellationQuads(this.state.tessellation);
-    const mapped = [];
-    quads.forEach((quad) => {
-      segments.forEach((segment) => {
-        const start = quadUvToBarycentric(quad, segment.start.uv);
-        const end = quadUvToBarycentric(quad, segment.end.uv);
-        mapped.push({
-          id: `${segment.id}-${quad.id}`,
-          start,
-          end,
-        });
-        if (this.state.mirror) {
-          mapped.push({
-            id: `${segment.id}-${quad.id}-m`,
-            start: mirrorBarycentric(start),
-            end: mirrorBarycentric(end),
-          });
-        }
-      });
+  anchor() {
+    return this.dragStart ?? this.pending;
+  }
+
+  toLocal(event) {
+    const pt = this.editorSvg.createSVGPoint();
+    pt.x = event.clientX;
+    pt.y = event.clientY;
+    const local = pt.matrixTransform(this.editorSvg.getScreenCTM().inverse());
+    return { x: local.x, y: local.y };
+  }
+
+  nearestSnap(point) {
+    let best = null;
+    let bestDist = Math.min(SNAP_RADIUS, SNAP_FRACTION_OF_SPACING / this.state.grid);
+    this.snapTargets.forEach(({ p }) => {
+      const { x, y } = barycentricToCartesian(p);
+      const dist = Math.hypot(x - point.x, y - point.y);
+      if (dist < bestDist) {
+        best = p;
+        bestDist = dist;
+      }
     });
-    return mapped;
+    return best;
+  }
+
+  /**
+   * Select the span of the clicked line between its nearest junctions.
+   * Clicking an already-selected span widens the selection to the whole line.
+   */
+  selectAt(point) {
+    let hit = null;
+    let bestDist = Math.max(LINE_HIT_RADIUS, this.lineWidth / 2);
+    this.segments.forEach(({ start, end }, index) => {
+      const { distance, t } = projectOntoSegment(point, barycentricToCartesian(start), barycentricToCartesian(end));
+      if (distance < bestDist) {
+        hit = { index, t };
+        bestDist = distance;
+      }
+    });
+    if (!hit) {
+      return null;
+    }
+    const cuts = junctionParams(this.segments)[hit.index];
+    const t0 = Math.max(...cuts.filter((t) => t <= hit.t));
+    const t1 = Math.min(...cuts.filter((t) => t >= hit.t));
+    const source = this.segments[hit.index].source;
+    const current = this.selected;
+    if (current && current.source === source && current.t0 === t0 && current.t1 === t1) {
+      return { source, t0: 0, t1: 1 };
+    }
+    return { source, t0, t1 };
+  }
+
+  deleteSelection() {
+    const { source, t0, t1 } = this.selected;
+    const [start, end] = this.state.strokes[source];
+    const remaining = [];
+    if (t0 > 1e-6) {
+      remaining.push([{ ...start }, lerpBary(start, end, t0)]);
+    }
+    if (t1 < 1 - 1e-6) {
+      remaining.push([lerpBary(start, end, t1), { ...end }]);
+    }
+    this.pushHistory();
+    this.state.strokes.splice(source, 1, ...remaining);
+    this.selected = null;
+    this.refresh();
+  }
+
+  handlePointerDown(event) {
+    if (event.button !== 0) {
+      return;
+    }
+    const point = this.toLocal(event);
+    const selecting = this.mode === 'select' || event.altKey;
+    const snap = selecting ? null : this.nearestSnap(point);
+
+    if (!snap) {
+      this.pending = null;
+      this.selected = this.selectAt(point);
+      this.renderSegments();
+      this.renderInteraction();
+      return;
+    }
+
+    this.selected = null;
+    if (this.pending && !samePoint(this.pending, snap)) {
+      this.addStroke(this.pending, snap);
+      this.pending = snap;
+      this.renderInteraction();
+      return;
+    }
+    this.dragStart = snap;
+    this.editorSvg.setPointerCapture(event.pointerId);
+    this.renderSegments();
+    this.renderInteraction();
+  }
+
+  handlePointerMove(event) {
+    this.cursor = this.toLocal(event);
+    this.hover = this.mode === 'select' || event.altKey ? null : this.nearestSnap(this.cursor);
+    this.renderInteraction();
+  }
+
+  setMode(mode) {
+    this.mode = mode;
+    this.pending = null;
+    this.hover = null;
+    this.drawButton.classList.toggle('active', mode === 'draw');
+    this.selectButton.classList.toggle('active', mode === 'select');
+    this.renderInteraction();
+  }
+
+  handlePointerUp(event) {
+    if (!this.dragStart) {
+      return;
+    }
+    const snap = this.nearestSnap(this.toLocal(event));
+    const start = this.dragStart;
+    this.dragStart = null;
+    if (snap && !samePoint(snap, start)) {
+      this.addStroke(start, snap);
+      this.pending = null;
+    } else {
+      // A click without dragging starts (or cancels) a chain from this dot.
+      this.pending = this.pending && samePoint(this.pending, start) ? null : start;
+    }
+    this.renderInteraction();
+  }
+
+  handleKeyDown(event) {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
+      return;
+    }
+    if (event.key === 'Escape') {
+      this.pending = null;
+      this.selected = null;
+      this.renderSegments();
+      this.renderInteraction();
+    } else if ((event.key === 'Delete' || event.key === 'Backspace') && this.selected !== null) {
+      event.preventDefault();
+      this.deleteSelection();
+    } else if (event.key === 'z' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      this.undo();
+    } else if ((event.key === 'v' || event.key === 'd') && !event.metaKey && !event.ctrlKey) {
+      this.setMode(event.key === 'v' ? 'select' : 'draw');
+    }
+  }
+
+  addStroke(start, end) {
+    const exists = this.segments.some(
+      (seg) =>
+        (samePoint(seg.start, start) && samePoint(seg.end, end)) ||
+        (samePoint(seg.start, end) && samePoint(seg.end, start)),
+    );
+    if (exists) {
+      return;
+    }
+    this.pushHistory();
+    this.state.strokes.push([{ ...start }, { ...end }]);
+    this.refresh();
+  }
+
+  applyPreset(key) {
+    const preset = PRESETS[key];
+    this.pushHistory();
+    this.state.symmetry = 'kaleidoscope';
+    this.state.strokes = preset.strokes.map(([p, q]) => [{ ...p }, { ...q }]);
+    if (preset.grid) {
+      this.state.grid = preset.grid;
+    }
+    this.pending = null;
+    this.selected = null;
+    this.syncControls();
+    if (preset.sphere && typeof this.onPreset === 'function') {
+      this.onPreset(preset);
+    }
+    this.refresh();
+  }
+
+  /** Draw pattern lines at their printed width, as a fraction of the face edge. */
+  setLineWidth(fraction) {
+    const width = Math.min(0.08, Math.max(0.006, fraction));
+    this.lineWidth = width;
+    this.editorSvg.style.setProperty('--line-width', width);
+    this.neighborSvg.style.setProperty('--line-width', width);
+  }
+
+  /** Color each expanded segment (same order as `segments`), or null for the default. */
+  setLineColors(colors) {
+    this.lineColors = colors;
+    this.renderSegments();
+  }
+
+  /** Show a clearance message (or hide it with null); `warn` styles it as a warning. */
+  setClearance(message, warn = false) {
+    this.clearanceNote.hidden = !message;
+    this.clearanceNote.textContent = message ?? '';
+    this.clearanceNote.classList.toggle('warn', warn);
+  }
+
+  setConnectivity(pieces) {
+    this.connectivityNote.classList.toggle('warn', pieces > 1);
+    if (pieces === 0) {
+      this.connectivityNote.textContent = '';
+    } else if (pieces === 1) {
+      this.connectivityNote.textContent = 'Prints as one connected piece.';
+    } else {
+      this.connectivityNote.textContent =
+        `Prints as ${pieces} separate pieces — some lines don't touch the rest. ` +
+        'Woven closed loops can still interlock like chain mail, but loose pieces that ' +
+        "aren't caught by the weave will fall out.";
+    }
+  }
+
+  pushHistory() {
+    this.history.push(JSON.stringify(this.state));
+    if (this.history.length > 100) {
+      this.history.shift();
+    }
+  }
+
+  undo() {
+    if (this.pending) {
+      this.pending = null;
+      this.renderInteraction();
+      return;
+    }
+    const snapshot = this.history.pop();
+    if (!snapshot) {
+      return;
+    }
+    this.state = JSON.parse(snapshot);
+    this.selected = null;
+    this.syncControls();
+    this.refresh();
+  }
+
+  clear() {
+    if (!this.state.strokes.length) {
+      return;
+    }
+    this.pushHistory();
+    this.state.strokes = [];
+    this.pending = null;
+    this.selected = null;
+    this.refresh();
   }
 
   emitChange() {
     this.persist();
-    if (typeof this.onChange !== 'function') {
-      return;
+    if (typeof this.onChange === 'function') {
+      this.onChange({ connections: this.segments.map(({ start, end }) => ({ start, end })) });
     }
-    const connections = this.buildTriangleConnections();
-    this.onChange({ connections });
   }
 
   serialize() {
-    return {
-      version: 1,
-      tessellation: this.state.tessellation,
-      mirror: this.state.mirror,
-      quad: this.quadEditor.serialize(),
-    };
+    return { version: 2, ...this.state };
   }
 
   loadData(data) {
-    if (!data || typeof data !== 'object') {
+    if (data?.version !== 2 || !Array.isArray(data.strokes)) {
       return false;
     }
-    if (data.tessellation && getTessellationOptions().some(({ value }) => value === data.tessellation)) {
-      this.state.tessellation = data.tessellation;
-      this.tessSelect.value = data.tessellation;
-    }
-    this.state.mirror = data.mirror !== false;
-    this.mirrorCheckbox.checked = this.state.mirror;
-    this.quadEditor.load(data.quad);
-    this.state.quadSegments = this.quadEditor.getSegments();
+    this.state = {
+      symmetry: SYMMETRIES[data.symmetry] ? data.symmetry : 'kaleidoscope',
+      grid: GRID_SIZES.includes(data.grid) ? data.grid : 6,
+      strokes: data.strokes.map(([p, q]) => [{ ...p }, { ...q }]),
+    };
     return true;
   }
 
@@ -274,19 +591,19 @@ export class TemplateEditor {
   restoreFromStorage() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        return;
+      if (raw) {
+        this.loadData(JSON.parse(raw));
+      } else {
+        this.state.strokes = PRESETS.lineSphere.strokes.map(([p, q]) => [{ ...p }, { ...q }]);
+        this.state.grid = PRESETS.lineSphere.grid;
       }
-      this.loadData(JSON.parse(raw));
     } catch {
       // Ignore corrupt saved state.
     }
   }
 
   exportJson() {
-    const blob = new Blob([JSON.stringify(this.serialize(), null, 2)], {
-      type: 'application/json',
-    });
+    const blob = new Blob([JSON.stringify(this.serialize(), null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -302,433 +619,76 @@ export class TemplateEditor {
       return;
     }
     try {
-      const data = JSON.parse(await file.text());
-      if (this.loadData(data)) {
-        this.updatePreview();
-        this.emitChange();
+      this.pushHistory();
+      if (!this.loadData(JSON.parse(await file.text()))) {
+        throw new Error('Unsupported pattern file');
       }
+      this.syncControls();
+      this.refresh();
     } catch {
+      this.history.pop();
       window.alert('Could not read that file as a saved pattern.');
     }
   }
-
-  makeButton(label) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = label;
-    return button;
-  }
 }
 
-class QuadEditor {
-  constructor(rootEl, { onChange }) {
-    this.rootEl = rootEl;
-    this.onChange = onChange;
-    this.state = {
-      selectedAnchorId: null,
-      selectedConnectionId: null,
-      connections: [],
-    };
-    this.baseAnchors = createSquareAnchors();
-    this.dynamicAnchors = new Map();
-    this.midpointAnchors = new Map();
-    this.history = [];
-
-    this.handleKeyDown = (event) => {
-      if ((event.key === 'Delete' || event.key === 'Backspace') && this.state.selectedConnectionId) {
-        this.deleteSelectedConnection();
-      }
-    };
-
-    this.buildUI();
-    this.render();
-    window.addEventListener('keydown', this.handleKeyDown);
-  }
-
-  buildUI() {
-    this.svg = document.createElementNS(SVG_NS, 'svg');
-    this.svg.setAttribute('viewBox', '0 0 1 1');
-    this.svg.setAttribute('id', 'quad-editor');
-
-    const border = document.createElementNS(SVG_NS, 'rect');
-    border.setAttribute('x', '0');
-    border.setAttribute('y', '0');
-    border.setAttribute('width', '1');
-    border.setAttribute('height', '1');
-    border.setAttribute('rx', '0.04');
-    border.setAttribute('ry', '0.04');
-    border.setAttribute('fill', 'rgba(255,255,255,0.02)');
-    border.setAttribute('stroke', 'rgba(255,255,255,0.2)');
-    border.setAttribute('stroke-width', '0.01');
-
-    this.overlayLines = document.createElementNS(SVG_NS, 'g');
-    this.connectionLayer = document.createElementNS(SVG_NS, 'g');
-    this.midpointLayer = document.createElementNS(SVG_NS, 'g');
-    this.anchorLayer = document.createElementNS(SVG_NS, 'g');
-
-    this.svg.append(border, this.overlayLines, this.connectionLayer, this.midpointLayer, this.anchorLayer);
-    this.renderGuides();
-    this.rootEl.appendChild(this.svg);
-  }
-
-  renderGuides() {
-    this.overlayLines.innerHTML = '';
-    for (let i = 1; i < 4; i += 1) {
-      const t = i / 4;
-      const hLine = makeSvgLine({ x: 0, y: t }, { x: 1, y: t }, 'rgba(255,255,255,0.05)', 0.004);
-      const vLine = makeSvgLine({ x: t, y: 0 }, { x: t, y: 1 }, 'rgba(255,255,255,0.05)', 0.004);
-      this.overlayLines.append(hLine, vLine);
-    }
-  }
-
-  render() {
-    this.renderConnections();
-    this.renderAnchors();
-  }
-
-  renderConnections() {
-    this.connectionLayer.innerHTML = '';
-    this.midpointLayer.innerHTML = '';
-    this.midpointAnchors.clear();
-
-    this.state.connections.forEach((connection) => {
-      const line = makeSvgLine(
-        { x: connection.start.uv.u, y: connection.start.uv.v },
-        { x: connection.end.uv.u, y: connection.end.uv.v },
-        '#fef4b4',
-        0.012,
-      );
-      line.classList.add('connection-line');
-      if (connection.id === this.state.selectedConnectionId) {
-        line.classList.add('selected');
-      }
-      line.addEventListener('click', (event) => {
-        event.stopPropagation();
-        this.handleConnectionSelection(connection.id);
-      });
-      this.connectionLayer.appendChild(line);
-
-      const midpointId = `mid-${connection.id}`;
-      const uv = {
-        u: (connection.start.uv.u + connection.end.uv.u) / 2,
-        v: (connection.start.uv.v + connection.end.uv.v) / 2,
-      };
-      this.midpointAnchors.set(midpointId, { id: midpointId, uv, connectionId: connection.id });
-
-      const circle = document.createElementNS(SVG_NS, 'circle');
-      circle.setAttribute('cx', uv.u);
-      circle.setAttribute('cy', uv.v);
-      circle.setAttribute('r', '0.012');
-      circle.classList.add('mid-point');
-      circle.addEventListener('click', (event) => {
-        event.stopPropagation();
-        this.handleAnchorSelection(midpointId);
-      });
-      this.midpointLayer.appendChild(circle);
-    });
-  }
-
-  renderAnchors() {
-    this.anchorLayer.innerHTML = '';
-    [...this.baseAnchors.values(), ...this.dynamicAnchors.values()].forEach((anchor) => {
-      const circle = document.createElementNS(SVG_NS, 'circle');
-      circle.setAttribute('cx', anchor.uv.u);
-      circle.setAttribute('cy', anchor.uv.v);
-      circle.setAttribute('r', anchor.type === 'base' ? '0.0125' : '0.014');
-      circle.classList.add(anchor.type === 'base' ? 'edge-point' : 'anchor-point');
-      if (anchor.id === this.state.selectedAnchorId) {
-        circle.classList.add('active');
-      }
-      circle.addEventListener('click', (event) => {
-        event.stopPropagation();
-        this.handleAnchorSelection(anchor.id);
-      });
-      this.anchorLayer.appendChild(circle);
-    });
-  }
-
-  handleAnchorSelection(anchorId) {
-    // Clicking a midpoint splits its connection and promotes the midpoint to
-    // a real anchor. That mutates connections, so snapshot history first. If
-    // another anchor was already selected, connect it to the new anchor.
-    if (this.midpointAnchors.has(anchorId)) {
-      const previousId = this.state.selectedAnchorId;
-      this.pushHistory();
-      const anchor = this.getAnchor(anchorId);
-      if (!anchor) {
-        this.history.pop();
-        return;
-      }
-      const previous = previousId ? this.getAnchor(previousId) : null;
-      if (previous && previous.id !== anchor.id) {
-        this.state.connections.push({
-          id: `seg-${Date.now()}-${this.state.connections.length}`,
-          start: cloneAnchor(previous),
-          end: cloneAnchor(anchor),
-        });
-        this.state.selectedAnchorId = null;
-      }
-      this.render();
-      this.emitChange();
-      return;
-    }
-
-    const anchor = this.getAnchor(anchorId);
-    if (!anchor) {
-      return;
-    }
-
-    if (!this.state.selectedAnchorId) {
-      this.state.selectedAnchorId = anchor.id;
-      this.renderAnchors();
-      return;
-    }
-
-    if (this.state.selectedAnchorId === anchor.id) {
-      this.state.selectedAnchorId = null;
-      this.state.selectedConnectionId = null;
-      this.renderAnchors();
-      return;
-    }
-
-    const previous = this.getAnchor(this.state.selectedAnchorId);
-    if (!previous) {
-      this.state.selectedAnchorId = anchor.id;
-      this.renderAnchors();
-      return;
-    }
-
-    if (previous.edge !== null && anchor.edge !== null && previous.edge === anchor.edge) {
-      this.state.selectedAnchorId = anchor.id;
-      this.renderAnchors();
-      return;
-    }
-
-    this.pushHistory();
-    this.state.connections.push({
-      id: `seg-${Date.now()}-${this.state.connections.length}`,
-      start: cloneAnchor(previous),
-      end: cloneAnchor(anchor),
-    });
-    this.state.selectedAnchorId = null;
-    this.state.selectedConnectionId = null;
-    this.render();
-    this.emitChange();
-  }
-
-  handleConnectionSelection(connectionId) {
-    if (this.state.selectedConnectionId === connectionId) {
-      this.state.selectedConnectionId = null;
-    } else {
-      this.state.selectedConnectionId = connectionId;
-      this.state.selectedAnchorId = null;
-    }
-    this.renderConnections();
-  }
-
-  promoteMidpoint(midpointId) {
-    const meta = this.midpointAnchors.get(midpointId);
-    if (!meta) {
-      return null;
-    }
-    const index = this.state.connections.findIndex((conn) => conn.id === meta.connectionId);
-    if (index === -1) {
-      return null;
-    }
-    const connection = this.state.connections[index];
-    const anchorId = `anchor-${meta.connectionId}`;
-    const anchor = {
-      id: anchorId,
-      type: 'interior',
-      edge: null,
-      uv: meta.uv,
-    };
-    this.dynamicAnchors.set(anchorId, anchor);
-
-    const first = {
-      id: `${connection.id}-a`,
-      start: cloneAnchor(connection.start),
-      end: cloneAnchor(anchor),
-    };
-    const second = {
-      id: `${connection.id}-b`,
-      start: cloneAnchor(anchor),
-      end: cloneAnchor(connection.end),
-    };
-
-    this.state.connections.splice(index, 1, first, second);
-    this.midpointAnchors.delete(midpointId);
-    this.state.selectedAnchorId = anchorId;
-    return anchor;
-  }
-
-  getAnchor(anchorId) {
-    if (this.baseAnchors.has(anchorId)) {
-      return this.baseAnchors.get(anchorId);
-    }
-    if (this.dynamicAnchors.has(anchorId)) {
-      return this.dynamicAnchors.get(anchorId);
-    }
-    if (this.midpointAnchors.has(anchorId)) {
-      return this.promoteMidpoint(anchorId);
-    }
-    return null;
-  }
-
-  deleteSelectedConnection() {
-    if (!this.state.selectedConnectionId) {
-      return;
-    }
-    this.pushHistory();
-    this.state.connections = this.state.connections.filter(({ id }) => id !== this.state.selectedConnectionId);
-    this.state.selectedConnectionId = null;
-    this.render();
-    this.emitChange();
-  }
-
-  pushHistory() {
-    this.history.push({
-      connections: this.state.connections.map(cloneConnection),
-      dynamicAnchors: [...this.dynamicAnchors.values()].map(cloneAnchor),
-    });
-    if (this.history.length > 100) {
-      this.history.shift();
-    }
-  }
-
-  undo() {
-    if (this.state.selectedAnchorId) {
-      this.state.selectedAnchorId = null;
-      this.renderAnchors();
-      return;
-    }
-    const snapshot = this.history.pop();
-    if (!snapshot) {
-      return;
-    }
-    this.state.connections = snapshot.connections.map(cloneConnection);
-    this.dynamicAnchors = new Map(snapshot.dynamicAnchors.map((anchor) => [anchor.id, cloneAnchor(anchor)]));
-    this.state.selectedAnchorId = null;
-    this.state.selectedConnectionId = null;
-    this.render();
-    this.emitChange();
-  }
-
-  clear() {
-    if (!this.state.connections.length && !this.dynamicAnchors.size) {
-      return;
-    }
-    this.pushHistory();
-    this.state.connections = [];
-    this.state.selectedAnchorId = null;
-    this.state.selectedConnectionId = null;
-    this.dynamicAnchors.clear();
-    this.render();
-    this.emitChange();
-  }
-
-  getSegments() {
-    return this.state.connections.map((connection) => ({
-      id: connection.id,
-      start: { uv: { ...connection.start.uv } },
-      end: { uv: { ...connection.end.uv } },
-    }));
-  }
-
-  serialize() {
-    return {
-      connections: this.state.connections.map(cloneConnection),
-      dynamicAnchors: [...this.dynamicAnchors.values()].map(cloneAnchor),
-    };
-  }
-
-  load(data) {
-    this.state.connections = Array.isArray(data?.connections)
-      ? data.connections.map(cloneConnection)
-      : [];
-    this.dynamicAnchors = new Map(
-      (Array.isArray(data?.dynamicAnchors) ? data.dynamicAnchors : []).map((anchor) => [
-        anchor.id,
-        cloneAnchor(anchor),
-      ]),
-    );
-    this.state.selectedAnchorId = null;
-    this.state.selectedConnectionId = null;
-    this.history = [];
-    this.render();
-  }
-
-  emitChange() {
-    if (typeof this.onChange === 'function') {
-      this.onChange(this.getSegments());
-    }
-  }
-}
-
-function createSquareAnchors(divisions = 4) {
-  const anchors = new Map();
-  const edges = [
-    { id: 'top', start: { u: 0, v: 0 }, end: { u: 1, v: 0 } },
-    { id: 'right', start: { u: 1, v: 0 }, end: { u: 1, v: 1 } },
-    { id: 'bottom', start: { u: 1, v: 1 }, end: { u: 0, v: 1 } },
-    { id: 'left', start: { u: 0, v: 1 }, end: { u: 0, v: 0 } },
-  ];
-
-  edges.forEach((edge, edgeIndex) => {
-    for (let i = 0; i <= divisions; i += 1) {
-      const t = i / divisions;
-      const uv = {
-        u: edge.start.u * (1 - t) + edge.end.u * t,
-        v: edge.start.v * (1 - t) + edge.end.v * t,
-      };
-      const id = `edge-${edge.id}-${i}`;
-      anchors.set(id, {
-        id,
-        type: 'base',
-        edge: edgeIndex,
-        uv,
-      });
-    }
+function makeSelect(options) {
+  const select = document.createElement('select');
+  options.forEach(({ value, label }) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    select.appendChild(option);
   });
-
-  return anchors;
+  return select;
 }
 
-function cloneAnchor(anchor) {
-  return {
-    id: anchor.id,
-    type: anchor.type,
-    edge: anchor.edge ?? null,
-    uv: { ...anchor.uv },
-  };
+function labelled(text, control) {
+  const label = document.createElement('label');
+  label.textContent = text;
+  label.appendChild(control);
+  return label;
 }
 
-function cloneConnection(connection) {
-  return {
-    id: connection.id,
-    start: cloneAnchor(connection.start),
-    end: cloneAnchor(connection.end),
-  };
+function makeButton(label, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', onClick);
+  return button;
 }
 
-function makeSvgLine(start, end, stroke, strokeWidth) {
-  const line = document.createElementNS(SVG_NS, 'line');
-  line.setAttribute('x1', start.x);
-  line.setAttribute('y1', start.y);
-  line.setAttribute('x2', end.x);
-  line.setAttribute('y2', end.y);
-  line.setAttribute('stroke', stroke);
-  line.setAttribute('stroke-width', strokeWidth);
-  line.setAttribute('stroke-linecap', 'round');
-  return line;
+function svgEl(tag, attrs = {}) {
+  return setAttrs(document.createElementNS(SVG_NS, tag), attrs);
+}
+
+function setAttrs(el, attrs) {
+  Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+  return el;
+}
+
+function trianglePoints(points) {
+  return points.map(({ x, y }) => `${x},${y}`).join(' ');
+}
+
+function cartLine(start, end, className) {
+  return svgEl('line', { x1: start.x, y1: start.y, x2: end.x, y2: end.y, class: className });
+}
+
+function baryLine(p, q, className) {
+  return cartLine(barycentricToCartesian(p), barycentricToCartesian(q), className);
+}
+
+function projectOntoSegment(point, p1, p2) {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const t = Math.max(0, Math.min(1, ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / (dx * dx + dy * dy)));
+  return { distance: Math.hypot(point.x - (p1.x + t * dx), point.y - (p1.y + t * dy)), t };
 }
 
 function reflectAcrossLine(point, p1, p2) {
   const dx = p2.x - p1.x;
   const dy = p2.y - p1.y;
-  const lengthSq = dx * dx + dy * dy;
-  const t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / lengthSq;
-  const projX = p1.x + t * dx;
-  const projY = p1.y + t * dy;
-  return { x: 2 * projX - point.x, y: 2 * projY - point.y };
+  const t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / (dx * dx + dy * dy);
+  return { x: 2 * (p1.x + t * dx) - point.x, y: 2 * (p1.y + t * dy) - point.y };
 }

@@ -2,38 +2,26 @@
 // Run with: node scripts/smoke-solid.mjs
 import { writeFileSync } from 'node:fs';
 import { createGeodesicSphere } from '../src/geodesic.js';
-import { getTessellationQuads, quadUvToBarycentric, mirrorBarycentric } from '../src/templateSpace.js';
-import { collectProjectedSegments } from '../src/projection.js';
+import { PRESETS, expandStrokes } from '../src/templateSpace.js';
+import { buildWovenSegments } from '../src/weave.js';
+import { countPieces } from '../src/connectivity.js';
 import { buildStrutSolid } from '../src/solid.js';
 import { meshToBinaryStl } from '../src/stl.js';
 
-const geometry = createGeodesicSphere({ base: 'icosahedron', frequency: 3, radius: 1 });
+const geometry = createGeodesicSphere({ base: 'icosahedron', frequency: 1, radius: 1 });
 console.log('geodesic vertices:', geometry.getAttribute('position').count);
 
-// A simple test stroke in the quad: one diagonal.
-const quadSegments = [
-  { id: 'seg-test', start: { uv: { u: 0, v: 0.25 } }, end: { uv: { u: 1, v: 0.75 } } },
-];
+const connections = expandStrokes(PRESETS.lineSphere.strokes, 'kaleidoscope');
+console.log('triangle connections:', connections.length, 'pieces:', countPieces(connections, geometry));
 
-const quads = getTessellationQuads('triforce');
-const connections = [];
-quads.forEach((quad) => {
-  quadSegments.forEach((segment) => {
-    const start = quadUvToBarycentric(quad, segment.start.uv);
-    const end = quadUvToBarycentric(quad, segment.end.uv);
-    connections.push({ id: `${segment.id}-${quad.id}`, start, end });
-    connections.push({
-      id: `${segment.id}-${quad.id}-m`,
-      start: mirrorBarycentric(start),
-      end: mirrorBarycentric(end),
-    });
-  });
-});
-console.log('triangle connections:', connections.length);
-
-const segments = collectProjectedSegments(connections, geometry, {
+// Woven round struts: 2.5 mm struts on a 60 mm sphere.
+const { segments, strandIds } = buildWovenSegments(connections, geometry, {
   radius: 1,
-  samplesPerSegment: 8,
+  samplesPerSegment: 16,
+  amplitude: (0.32 * 2.5) / 30,
+  minBendRadius: (3 * 1.25) / 30,
+  bendRadius: 3 / 30,
+  loop: { height: 7 / 30, halfLength: 10 / 30 },
 });
 console.log('deduped sub-segments:', segments.length / 6);
 
@@ -45,8 +33,10 @@ console.time('buildStrutSolid');
 const meshData = await buildStrutSolid({
   segments: segmentsMm,
   sphereRadius: diameterMm / 2,
-  strutRadius: 1.25,
-  edgeLength: 1.0,
+  profile: { type: 'round', radius: 1.25 },
+  strandIds,
+  blendRadius: 0.7 * 1.25,
+  edgeLength: 0.8,
 });
 console.timeEnd('buildStrutSolid');
 console.log('solid triangles:', meshData.triangleCount, 'vertices:', meshData.vertexCount);

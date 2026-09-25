@@ -73,77 +73,140 @@ body {
 #template-root svg {
   width: 100%;
   height: auto;
-  aspect-ratio: 1 / 0.866;
   border-radius: 0.75rem;
   background: radial-gradient(circle at top, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
   box-shadow: inset 0 1px 6px rgba(0, 0, 0, 0.4);
 }
 
-.edge-point {
-  fill: rgba(255, 255, 255, 0.5);
-  stroke: #050608;
-  stroke-width: 0.002;
-  cursor: pointer;
-  transition: fill 0.2s, r 0.2s;
+#triangle-editor {
+  aspect-ratio: 1.12 / 0.99;
+  touch-action: none;
+  user-select: none;
 }
 
-.edge-point:hover,
-.edge-point.active {
-  fill: #8ae5ff;
-  r: 0.013;
+#neighbor-preview {
+  aspect-ratio: 2.1 / 1.85;
+  max-width: 220px;
+  align-self: center;
 }
 
-.anchor-point {
-  fill: rgba(255, 255, 255, 0.55);
-  stroke: #050608;
-  stroke-width: 0.002;
-  cursor: pointer;
-  transition: fill 0.2s, r 0.2s;
-}
-
-.anchor-point:hover,
-.anchor-point.active {
-  fill: #b4f0ff;
-  r: 0.014;
-}
-
-.mid-point {
-  fill: rgba(255, 255, 255, 0.4);
-  stroke: #050608;
-  stroke-width: 0.002;
-  cursor: pointer;
-  transition: fill 0.2s, r 0.2s;
-}
-
-.mid-point:hover,
-.mid-point.active {
-  fill: #ffd976;
-  r: 0.012;
-}
-
-.connection-line {
-  cursor: pointer;
-  transition: stroke 0.2s, stroke-width 0.2s;
-}
-
-.connection-line.selected {
-  stroke: #ffe06b;
+.template-outline {
+  fill: rgba(157, 222, 255, 0.04);
+  stroke: rgba(255, 255, 255, 0.35);
   stroke-width: 0.006;
+}
+
+.grid-line {
+  stroke: rgba(255, 255, 255, 0.07);
+  stroke-width: 0.003;
+}
+
+.mirror-axis {
+  stroke: rgba(138, 229, 255, 0.25);
+  stroke-width: 0.003;
+  stroke-dasharray: 0.015 0.012;
+}
+
+.pattern-line {
+  stroke: #fef4b4;
+  stroke-width: var(--line-width, 0.008);
+  stroke-linecap: round;
+}
+
+.pattern-line.selected {
+  stroke: #ff9f5a;
+}
+
+.rubber-band {
+  stroke: #8ae5ff;
+  stroke-width: 0.005;
+  stroke-dasharray: 0.02 0.012;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.snap-dot {
+  fill: rgba(255, 255, 255, 0.45);
+  stroke: rgba(5, 6, 8, 0.8);
+  stroke-width: 0.004;
+  pointer-events: none;
+}
+
+.snap-dot.endpoint {
+  fill: rgba(254, 244, 180, 0.8);
+}
+
+.snap-dot.crossing {
+  fill: rgba(255, 159, 90, 0.8);
+}
+
+.snap-dot.hover {
+  fill: #8ae5ff;
+  r: 0.016;
+}
+
+.snap-dot.active {
+  fill: #8ae5ff;
+  stroke: #ffffff;
+  stroke-width: 0.004;
+  r: 0.018;
+}
+
+.neighbor-outline {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 0.006;
+}
+
+.neighbor-line {
+  stroke: rgba(254, 244, 180, 0.35);
+  stroke-width: var(--line-width, 0.008);
+  stroke-linecap: round;
+}
+
+.template-hint,
+.template-warning {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: rgba(243, 243, 243, 0.6);
+}
+
+.template-warning {
+  color: #ffb27a;
+}
+
+.template-connectivity {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #9be8a8;
+}
+
+.template-connectivity.warn {
+  color: #ffb27a;
+}
+
+.template-subtitle {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(243, 243, 243, 0.55);
 }
 
 .template-toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
 .template-toolbar label {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: rgba(243, 243, 243, 0.7);
+  color: rgba(243, 243, 243, 0.6);
 }
 
 .template-toolbar select {
@@ -155,43 +218,25 @@ body {
   padding: 0.35rem 0.5rem;
 }
 
-.template-layout {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+.template-toolbar span {
+  flex: 1 0 100%;
+  font-size: 0.7rem;
+  color: rgba(243, 243, 243, 0.6);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-#quad-editor-root,
-#triangle-preview-root {
-  width: 100%;
-}
-
-#quad-editor {
-  width: 100%;
-  height: auto;
-  aspect-ratio: 1 / 1;
-  border-radius: 0.8rem;
-  box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.45);
-  background: radial-gradient(circle at top, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
-}
-
-#triangle-preview {
-  width: 100%;
-  height: auto;
-  aspect-ratio: 2.1 / 1.85;
-}
-
-.mirror-toggle {
-  flex-direction: row !important;
-  align-items: center;
-  gap: 0.4rem;
+.template-toolbar button {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(12, 14, 20, 0.9);
+  color: rgba(243, 243, 243, 0.9);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.4rem 0.65rem;
+  border-radius: 0.45rem;
   cursor: pointer;
-}
-
-.mirror-toggle input[type='checkbox'] {
-  accent-color: #8ae5ff;
-  margin: 0;
-  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
 }
 
 .template-toolbar button:hover {
@@ -199,40 +244,10 @@ body {
   color: #b4f0ff;
 }
 
-.template-toolbar span {
-  flex: 1 0 100%;
-  font-size: 0.75rem;
-  color: rgba(243, 243, 243, 0.6);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.template-toolbar button,
-.template-toolbar label {
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(12, 14, 20, 0.9);
-  color: rgba(243, 243, 243, 0.9);
-  font-size: 0.8rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: 0.45rem 0.85rem;
-  border-radius: 0.5rem;
-  cursor: pointer;
-  transition: border-color 0.2s, color 0.2s, background 0.2s;
-}
-
 .template-toolbar button.active {
   border-color: #8ae5ff;
-  color: #8ae5ff;
-}
-
-.template-toolbar input[type='color'] {
-  border: none;
-  background: transparent;
-  padding: 0;
-  width: 2.5rem;
-  height: 2rem;
-  cursor: pointer;
+  background: rgba(138, 229, 255, 0.15);
+  color: #b4f0ff;
 }
 
 .overlay {
@@ -251,4 +266,13 @@ canvas {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+#viewport > .lil-gui {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 2;
+  max-height: calc(100% - 2rem);
+  overflow-y: auto;
 }
