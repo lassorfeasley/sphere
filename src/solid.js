@@ -15,21 +15,23 @@ function getManifoldModule() {
 /**
  * Build a watertight strut lattice from a set of line segments.
  *
- * With the round profile each segment becomes a capsule of radius
- * `profile.radius` centered on the sphere. With the band profile each segment
- * becomes a flat band `profile.width` wide that fills the shell from the
- * sphere surface down to `profile.depth` below it, so the outer faces are
- * flush with the sphere. Overlapping struts fuse automatically because the
- * whole lattice (plus the optional hanging loop) is extracted as one level
- * set of a signed distance field, so the result is guaranteed manifold.
+ * Every segment becomes a strut with a rounded-rectangle cross-section
+ * centered on it: `halfWidth` across the sphere surface and `halfHeight` out
+ * from it (measured along the sphere normal at the nearest point of the
+ * segment), with corners of radius `corner`. Equal half sizes with a full
+ * corner give a round capsule. Strut ends are that profile spun around the
+ * sphere normal, so struts meeting at a joint fuse smoothly. Overlapping
+ * struts fuse automatically because the whole lattice (plus the optional
+ * hanging loop) is extracted as one level set of a signed distance field,
+ * so the result is guaranteed manifold.
  *
  * @param segments Flat Float32Array [x1,y1,z1,x2,y2,z2,...] in output units (mm).
  * @param sphereRadius Radius of the sphere the segments lie on (mm).
- * @param profile { type: 'round', radius } or { type: 'band', width, depth } (mm).
+ * @param profile { halfWidth, halfHeight, corner } (mm), from `strutProfile`.
  * @param loop Optional torus { center, normal, majorRadius, minorRadius } (mm).
- * @param strandIds Optional strand index per segment. With round struts,
- *   different strands are joined with a smooth fillet of `blendRadius` where
- *   they touch, so crossings look like soft tubes pressed together.
+ * @param strandIds Optional strand index per segment. Different strands are
+ *   joined with a smooth fillet of `blendRadius` where they touch, so
+ *   crossings look like soft tubes pressed together.
  * @param edgeLength Approximate output triangle edge length (mm); smaller = finer.
  */
 export async function buildStrutSolid({
@@ -44,11 +46,17 @@ export async function buildStrutSolid({
   const wasm = await getManifoldModule();
   const { Manifold } = wasm;
 
-  const band = profile.type === 'band';
-  const halfWidth = band ? profile.width / 2 : profile.radius;
-  const innerRadius = band ? sphereRadius - profile.depth : 0;
+  const { halfWidth, halfHeight } = profile;
+  const halfExtent = Math.max(halfWidth, halfHeight);
+  // Perfectly sharp edges alias badly in the level-set mesh, so every corner
+  // keeps a little rounding.
+  const corner = Math.min(
+    Math.max(profile.corner, Math.min(edgeLength * 0.6, halfWidth * 0.5, halfHeight * 0.5)),
+    halfWidth,
+    halfHeight,
+  );
   const segmentCount = segments.length / 6;
-  const sdfMargin = halfWidth + blendRadius + edgeLength * 2;
+  const sdfMargin = halfExtent + blendRadius + edgeLength * 2;
 
   // Spatial hash so each SDF evaluation only tests nearby segments. Segments
   // are inserted into every cell their margin-expanded bounding box touches,
@@ -83,7 +91,13 @@ export async function buildStrutSolid({
     }
   }
 
-  const distanceToSegment = (px, py, pz, s) => {
+  // Distance from a point to the surface of one strut, positive outside.
+  // The offset from the nearest point on the segment splits into a radial
+  // part (along the sphere normal there) and everything else, and the
+  // rounded-rectangle distance is taken in that plane.
+  const insetX = halfWidth - corner;
+  const insetZ = halfHeight - corner;
+  const strutDistance = (px, py, pz, s) => {
     const o = s * 6;
     const ax = segments[o];
     const ay = segments[o + 1];
@@ -97,20 +111,32 @@ export async function buildStrutSolid({
       t = ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / lengthSq;
       t = Math.max(0, Math.min(1, t));
     }
-    const qx = px - (ax + dx * t);
-    const qy = py - (ay + dy * t);
-    const qz = pz - (az + dz * t);
-    return Math.sqrt(qx * qx + qy * qy + qz * qz);
+    const qx = ax + dx * t;
+    const qy = ay + dy * t;
+    const qz = az + dz * t;
+    const ox = px - qx;
+    const oy = py - qy;
+    const oz = pz - qz;
+    const qLength = Math.sqrt(qx * qx + qy * qy + qz * qz) || 1;
+    const r = (ox * qx + oy * qy + oz * qz) / qLength;
+    const l = Math.sqrt(Math.max(0, ox * ox + oy * oy + oz * oz - r * r));
+    const ux = l - insetX;
+    const uz = Math.abs(r) - insetZ;
+    const outside = Math.hypot(Math.max(ux, 0), Math.max(uz, 0));
+    return outside + Math.min(Math.max(ux, uz), 0) - corner;
   };
 
-  const nearestSegmentDistance = (x, y, z) => {
+  // Beyond the margin the exact value doesn't matter, only its sign.
+  const farDistance = sdfMargin - halfExtent;
+
+  const nearestStrutDistance = (x, y, z) => {
     const bucket = grid.get(cellKey(cellIndex(x), cellIndex(y), cellIndex(z)));
     if (!bucket) {
-      return sdfMargin;
+      return farDistance;
     }
     let minDistance = Infinity;
     for (let i = 0; i < bucket.length; i += 1) {
-      const distance = distanceToSegment(x, y, z, bucket[i]);
+      const distance = strutDistance(x, y, z, bucket[i]);
       if (distance < minDistance) {
         minDistance = distance;
       }
@@ -118,31 +144,20 @@ export async function buildStrutSolid({
     return minDistance;
   };
 
-  // Positive inside, negative outside. Far from the spherical shell the
-  // struts live in, the radial distance is a valid bound, so we can skip the
-  // spatial lookup entirely.
-  let minRadius = Infinity;
-  let maxRadius = 0;
-  for (let i = 0; i < segments.length; i += 3) {
-    const radius = Math.hypot(segments[i], segments[i + 1], segments[i + 2]);
-    minRadius = Math.min(minRadius, radius);
-    maxRadius = Math.max(maxRadius, radius);
-  }
-
   // Nearest distance to the two closest different strands, blended with a
   // polynomial smooth-min. Blending only across strands keeps each strand's
   // own joints from bulging.
   const blendedStrandDistance = (x, y, z) => {
     const bucket = grid.get(cellKey(cellIndex(x), cellIndex(y), cellIndex(z)));
     if (!bucket) {
-      return sdfMargin;
+      return farDistance;
     }
     let d1 = Infinity;
     let d2 = Infinity;
     let s1 = -1;
     let s2 = -1;
     for (let i = 0; i < bucket.length; i += 1) {
-      const d = distanceToSegment(x, y, z, bucket[i]);
+      const d = strutDistance(x, y, z, bucket[i]);
       const strand = strandIds[bucket[i]];
       if (strand === s1) {
         d1 = Math.min(d1, d);
@@ -161,33 +176,24 @@ export async function buildStrutSolid({
     return Math.min(d1, d2) - (h * h * blendRadius) / 4;
   };
 
-  const roundSdf = (x, y, z, r) => {
+  // Far from the spherical shell the struts live in, the radial distance is
+  // a valid bound, so the spatial lookup can be skipped entirely.
+  let minRadius = Infinity;
+  let maxRadius = 0;
+  for (let i = 0; i < segments.length; i += 3) {
+    const radius = Math.hypot(segments[i], segments[i + 1], segments[i + 2]);
+    minRadius = Math.min(minRadius, radius);
+    maxRadius = Math.max(maxRadius, radius);
+  }
+
+  const blend = strandIds && blendRadius > 0;
+  // Positive inside, negative outside.
+  const latticeSdf = (x, y, z, r) => {
     const shellDistance = Math.max(minRadius - r, r - maxRadius, 0);
     if (shellDistance > sdfMargin) {
-      return halfWidth - shellDistance;
+      return halfExtent - shellDistance;
     }
-    const distance =
-      strandIds && blendRadius > 0 ? blendedStrandDistance(x, y, z) : nearestSegmentDistance(x, y, z);
-    return halfWidth - distance;
-  };
-
-  // Lateral distance is measured on the sphere surface (the point is pushed
-  // out radially first), which keeps band walls perpendicular to the sphere.
-  // Corners are slightly rounded: perfectly sharp edges alias badly in the
-  // level-set mesh.
-  const bandCenter = (sphereRadius + innerRadius) / 2;
-  const halfDepth = (sphereRadius - innerRadius) / 2;
-  const cornerRadius = Math.min(edgeLength * 0.6, halfWidth * 0.5, halfDepth * 0.5);
-  const bandSdf = (x, y, z, r) => {
-    const dr = Math.abs(r - bandCenter) - (halfDepth - cornerRadius);
-    if (dr > edgeLength * 2 + cornerRadius || r === 0) {
-      return cornerRadius - dr;
-    }
-    const s = sphereRadius / r;
-    const dl = nearestSegmentDistance(x * s, y * s, z * s) - (halfWidth - cornerRadius);
-    const outside = Math.hypot(Math.max(dl, 0), Math.max(dr, 0));
-    const inside = Math.min(Math.max(dl, dr), 0);
-    return cornerRadius - outside - inside;
+    return -(blend ? blendedStrandDistance(x, y, z) : nearestStrutDistance(x, y, z));
   };
 
   const loopSdf = loop
@@ -203,12 +209,12 @@ export async function buildStrutSolid({
 
   const sdf = ([x, y, z]) => {
     const r = Math.sqrt(x * x + y * y + z * z);
-    const lattice = band ? bandSdf(x, y, z, r) : roundSdf(x, y, z, r);
+    const lattice = latticeSdf(x, y, z, r);
     return loopSdf ? Math.max(lattice, loopSdf(x, y, z)) : lattice;
   };
 
   const loopReach = loop ? loop.majorRadius * 2 + loop.minorRadius * 2 : 0;
-  const bound = Math.max(sphereRadius, maxRadius) + Math.max(halfWidth * 2, loopReach) + edgeLength * 2;
+  const bound = Math.max(sphereRadius, maxRadius) + Math.max(halfExtent * 2, loopReach) + edgeLength * 2;
   const bounds = {
     min: [-bound, -bound, -bound],
     max: [bound, bound, bound],

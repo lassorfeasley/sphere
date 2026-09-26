@@ -4,21 +4,37 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Geodesic Sphere Studio</title>
+    <title>Sphere Studio</title>
   </head>
   <body>
     <div id="app">
-      <div id="viewport">
-        <noscript>You need JavaScript enabled to explore the geodesic spheres.</noscript>
-      </div>
-      <aside id="pattern-panel">
-        <header>
-          <h1>Template Editor</h1>
-          <p>Edit one face, replicate everywhere.</p>
+      <aside id="sidebar" class="panel" aria-label="Design settings">
+        <header class="panel-header">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true"></span>
+            <div>
+              <h1>Sphere Studio</h1>
+              <p>Draw a tile, wrap a surface, print it.</p>
+            </div>
+          </div>
         </header>
-        <div id="template-root"></div>
+        <div id="controls" class="panel-scroll"></div>
+        <footer id="export-bar" class="panel-footer"></footer>
+      </aside>
+      <main id="viewport">
+        <div id="viewport-toolbar" class="viewport-toolbar"></div>
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+        <noscript>You need JavaScript enabled to explore the geodesic spheres.</noscript>
+      </main>
+      <aside id="pattern-panel" class="panel" aria-label="Pattern editor">
+        <header class="panel-header">
+          <h2>Pattern</h2>
+          <p>Draw on one face — it repeats across the whole surface.</p>
+        </header>
+        <div id="template-root" class="panel-scroll"></div>
       </aside>
     </div>
+    <div id="gallery"></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

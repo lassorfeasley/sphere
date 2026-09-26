@@ -33,7 +33,7 @@ console.time('buildStrutSolid');
 const meshData = await buildStrutSolid({
   segments: segmentsMm,
   sphereRadius: diameterMm / 2,
-  profile: { type: 'round', radius: 1.25 },
+  profile: { halfWidth: 1.25, halfHeight: 1.25, corner: 1.25 },
   strandIds,
   blendRadius: 0.7 * 1.25,
   edgeLength: 0.8,
@@ -43,6 +43,28 @@ console.log('solid triangles:', meshData.triangleCount, 'vertices:', meshData.ve
 
 if (!meshData.triangleCount) {
   throw new Error('Solid is empty!');
+}
+
+// Other cross-sections: a flat oval (3 × 1.8 mm) and a square-edged band
+// standing on edge (2.4 × 3 mm).
+for (const [name, profile] of [
+  ['oval', { halfWidth: 1.5, halfHeight: 0.9, corner: 0.9 }],
+  ['band', { halfWidth: 1.2, halfHeight: 1.5, corner: 0.18 }],
+]) {
+  console.time(name);
+  const other = await buildStrutSolid({
+    segments: segmentsMm,
+    sphereRadius: diameterMm / 2,
+    profile,
+    strandIds,
+    blendRadius: 0.9,
+    edgeLength: 1,
+  });
+  console.timeEnd(name);
+  console.log(`${name} triangles:`, other.triangleCount);
+  if (!other.triangleCount) {
+    throw new Error(`${name} solid is empty!`);
+  }
 }
 
 const stl = meshToBinaryStl(meshData);

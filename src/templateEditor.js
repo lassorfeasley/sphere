@@ -11,6 +11,7 @@ import {
   segmentIntersections,
   templateTriangle,
 } from './templateSpace.js';
+import { icon } from './ui/icons.js';
 
 const STORAGE_KEY = 'sphere-template-v2';
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -24,11 +25,11 @@ const SNAP_FRACTION_OF_SPACING = 0.3;
 const LINE_HIT_RADIUS = 0.02;
 
 export class TemplateEditor {
-  constructor(rootEl, { onChange, onPreset, onSelect } = {}) {
+  constructor(rootEl, { onChange, onSelect } = {}) {
     this.rootEl = rootEl;
     this.onChange = onChange;
-    this.onPreset = onPreset;
     this.onSelect = onSelect;
+    this.keyboardEnabled = true;
     this.state = {
       symmetry: 'kaleidoscope',
       grid: 6,
@@ -54,9 +55,23 @@ export class TemplateEditor {
   }
 
   buildUI() {
-    const controls = document.createElement('div');
-    controls.className = 'template-toolbar';
+    const tools = document.createElement('div');
+    tools.className = 'template-tools';
+    const modes = document.createElement('div');
+    modes.className = 'segmented';
+    this.drawButton = makeButton('Draw', () => this.setMode('draw'), { icon: 'pen', className: 'segment' });
+    this.selectButton = makeButton('Select', () => this.setMode('select'), { icon: 'cursor', className: 'segment' });
+    this.drawButton.title = 'Draw lines between dots (D)';
+    this.selectButton.title = 'Select lines to delete them (V, or hold Option while clicking)';
+    modes.append(this.drawButton, this.selectButton);
+    const undo = makeButton('', () => this.undo(), { icon: 'undo', className: 'icon-btn' });
+    undo.title = 'Undo (⌘Z)';
+    const clear = makeButton('', () => this.clear(), { icon: 'trash', className: 'icon-btn' });
+    clear.title = 'Clear all lines';
+    tools.append(modes, undo, clear);
 
+    const settings = document.createElement('div');
+    settings.className = 'template-settings';
     this.symmetrySelect = makeSelect(
       Object.entries(SYMMETRIES).map(([value, { label }]) => ({ value, label })),
     );
@@ -65,51 +80,15 @@ export class TemplateEditor {
       this.state.symmetry = this.symmetrySelect.value;
       this.refresh();
     });
-
     this.gridSelect = makeSelect(GRID_SIZES.map((n) => ({ value: String(n), label: `${n} per edge` })));
     this.gridSelect.addEventListener('change', () => {
       this.state.grid = Number(this.gridSelect.value);
       this.refresh(false);
     });
+    settings.append(labelled('Symmetry', this.symmetrySelect), labelled('Snap grid', this.gridSelect));
 
-    controls.append(labelled('Symmetry', this.symmetrySelect), labelled('Grid', this.gridSelect));
-
-    const presets = document.createElement('div');
-    presets.className = 'template-toolbar';
-    const presetsTitle = document.createElement('span');
-    presetsTitle.textContent = 'Start from';
-    presets.appendChild(presetsTitle);
-    Object.entries(PRESETS).forEach(([key, preset]) => {
-      presets.appendChild(makeButton(preset.label, () => this.applyPreset(key)));
-    });
-
-    const actions = document.createElement('div');
-    actions.className = 'template-toolbar';
-    this.fileInput = document.createElement('input');
-    this.fileInput.type = 'file';
-    this.fileInput.accept = 'application/json,.json';
-    this.fileInput.style.display = 'none';
-    this.fileInput.addEventListener('change', () => this.importJsonFile());
-    this.drawButton = makeButton('Draw', () => this.setMode('draw'));
-    this.selectButton = makeButton('Select', () => this.setMode('select'));
-    this.drawButton.title = 'Draw lines between dots (D)';
-    this.selectButton.title = 'Select lines to delete them (V, or hold Option while clicking)';
-    actions.append(
-      this.drawButton,
-      this.selectButton,
-      makeButton('Undo', () => this.undo()),
-      makeButton('Clear', () => this.clear()),
-      makeButton('Save', () => this.exportJson()),
-      makeButton('Load', () => this.fileInput.click()),
-      this.fileInput,
-    );
-
-    const hint = document.createElement('p');
-    hint.className = 'template-hint';
-    hint.textContent =
-      'Draw: drag between dots, or click dots one after another to chain lines (Esc stops). ' +
-      'Select (V, or hold Option): click a line to select the part between junctions, ' +
-      'click again for the whole line, then press Delete.';
+    this.hint = document.createElement('p');
+    this.hint.className = 'template-hint';
 
     this.editorSvg = svgEl('svg', { viewBox: EDITOR_VIEWBOX, id: 'triangle-editor' });
     this.gridLayer = svgEl('g');
@@ -134,33 +113,46 @@ export class TemplateEditor {
       this.renderInteraction();
     });
 
-    const neighborTitle = document.createElement('span');
-    neighborTitle.className = 'template-subtitle';
+    const editorFrame = document.createElement('div');
+    editorFrame.className = 'editor-frame';
+    editorFrame.append(this.editorSvg);
+
+    const neighbors = document.createElement('details');
+    neighbors.className = 'template-details';
+    neighbors.open = true;
+    const neighborTitle = document.createElement('summary');
     neighborTitle.textContent = 'With neighboring faces';
     this.neighborSvg = svgEl('svg', { viewBox: NEIGHBOR_VIEWBOX, id: 'neighbor-preview' });
     this.neighborWarning = document.createElement('p');
-    this.neighborWarning.className = 'template-warning';
+    this.neighborWarning.className = 'note';
+    this.neighborWarning.dataset.tone = 'warn';
     this.neighborWarning.textContent =
       'Without kaleidoscope symmetry, faces on the sphere can be rotated relative to each other, ' +
       'so lines may not meet at the edges the way this preview shows.';
+    neighbors.append(neighborTitle, this.neighborSvg, this.neighborWarning);
 
     this.connectivityNote = document.createElement('p');
-    this.connectivityNote.className = 'template-connectivity';
+    this.connectivityNote.className = 'note';
     this.clearanceNote = document.createElement('p');
-    this.clearanceNote.className = 'template-connectivity';
+    this.clearanceNote.className = 'note';
+    const notes = document.createElement('div');
+    notes.className = 'template-notes';
+    notes.append(this.connectivityNote, this.clearanceNote);
 
-    this.rootEl.append(
-      controls,
-      presets,
-      actions,
-      hint,
-      this.editorSvg,
-      this.connectivityNote,
-      this.clearanceNote,
-      neighborTitle,
-      this.neighborSvg,
-      this.neighborWarning,
-    );
+    this.fileInput = document.createElement('input');
+    this.fileInput.type = 'file';
+    this.fileInput.accept = 'application/json,.json';
+    this.fileInput.hidden = true;
+    this.fileInput.addEventListener('change', () => this.importJsonFile());
+    const files = document.createElement('div');
+    files.className = 'template-files';
+    const importButton = makeButton('Import JSON', () => this.fileInput.click(), { icon: 'upload', className: 'btn btn-ghost' });
+    const exportButton = makeButton('Export JSON', () => this.exportJson(), { icon: 'download', className: 'btn btn-ghost' });
+    importButton.title = 'Load a pattern saved as JSON';
+    exportButton.title = 'Download this pattern as JSON';
+    files.append(importButton, exportButton, this.fileInput);
+
+    this.rootEl.append(tools, editorFrame, this.hint, notes, settings, neighbors, files);
   }
 
   syncControls() {
@@ -417,6 +409,10 @@ export class TemplateEditor {
     this.hover = null;
     this.drawButton.classList.toggle('active', mode === 'draw');
     this.selectButton.classList.toggle('active', mode === 'select');
+    this.hint.textContent =
+      mode === 'draw'
+        ? 'Drag between dots to draw a line, or click dots one after another to chain lines. Esc stops a chain; hold Option to select.'
+        : 'Click a line to select the part between junctions; click again for the whole line. Delete removes it.';
     this.renderInteraction();
   }
 
@@ -438,7 +434,12 @@ export class TemplateEditor {
   }
 
   handleKeyDown(event) {
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) {
+    if (
+      !this.keyboardEnabled ||
+      event.target instanceof HTMLInputElement ||
+      event.target instanceof HTMLSelectElement ||
+      event.target.isContentEditable
+    ) {
       return;
     }
     if (event.key === 'Escape') {
@@ -471,20 +472,22 @@ export class TemplateEditor {
     this.refresh();
   }
 
-  applyPreset(key) {
-    const preset = PRESETS[key];
+  /** A copy of the pattern: symmetry, snap grid, and source strokes. */
+  getPattern() {
+    return JSON.parse(JSON.stringify(this.state));
+  }
+
+  /** Replace the pattern (undoable). A missing grid keeps the current one. */
+  loadPattern({ symmetry, grid, strokes }) {
     this.pushHistory();
-    this.state.symmetry = 'kaleidoscope';
-    this.state.strokes = preset.strokes.map(([p, q]) => [{ ...p }, { ...q }]);
-    if (preset.grid) {
-      this.state.grid = preset.grid;
-    }
+    this.state = {
+      symmetry: SYMMETRIES[symmetry] ? symmetry : 'kaleidoscope',
+      grid: GRID_SIZES.includes(grid) ? grid : this.state.grid,
+      strokes: strokes.map(([p, q]) => [{ ...p }, { ...q }]),
+    };
     this.pending = null;
     this.selected = null;
     this.syncControls();
-    if (preset.sphere && typeof this.onPreset === 'function') {
-      this.onPreset(preset);
-    }
     this.refresh();
   }
 
@@ -506,11 +509,12 @@ export class TemplateEditor {
   setClearance(message, warn = false) {
     this.clearanceNote.hidden = !message;
     this.clearanceNote.textContent = message ?? '';
-    this.clearanceNote.classList.toggle('warn', warn);
+    this.clearanceNote.dataset.tone = warn ? 'warn' : 'ok';
   }
 
   setConnectivity(pieces) {
-    this.connectivityNote.classList.toggle('warn', pieces > 1);
+    this.connectivityNote.hidden = !pieces;
+    this.connectivityNote.dataset.tone = pieces > 1 ? 'warn' : 'ok';
     if (pieces === 0) {
       this.connectivityNote.textContent = '';
     } else if (pieces === 1) {
@@ -650,10 +654,18 @@ function labelled(text, control) {
   return label;
 }
 
-function makeButton(label, onClick) {
+function makeButton(label, onClick, { icon: iconName, className } = {}) {
   const button = document.createElement('button');
   button.type = 'button';
-  button.textContent = label;
+  if (className) {
+    button.className = className;
+  }
+  button.innerHTML = iconName ? icon(iconName) : '';
+  if (label) {
+    const text = document.createElement('span');
+    text.textContent = label;
+    button.append(text);
+  }
   button.addEventListener('click', onClick);
   return button;
 }

@@ -12,7 +12,6 @@
     "vite": "^7.2.4"
   },
   "dependencies": {
-    "lil-gui": "^0.21.0",
     "manifold-3d": "^3.5.1",
     "three": "^0.181.2"
   }

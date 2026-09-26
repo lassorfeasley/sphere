@@ -1,6 +1,6 @@
 import { BufferGeometry, Float32BufferAttribute, Vector3 } from 'three';
 
-const BASE_TYPES = ['icosahedron', 'octahedron'];
+const BASE_TYPES = ['icosahedron', 'octahedron', 'pentakis dodecahedron', 'tetrakis hexahedron'];
 
 export function getBaseTypes() {
   return BASE_TYPES.slice();
@@ -81,6 +81,10 @@ function createBasePolyhedron(type) {
   switch (type) {
     case 'octahedron':
       return createOctahedron();
+    case 'pentakis dodecahedron':
+      return createPentakisDodecahedron();
+    case 'tetrakis hexahedron':
+      return createTetrakisHexahedron();
     case 'icosahedron':
     default:
       return createIcosahedron();
@@ -127,6 +131,60 @@ function createIcosahedron() {
     [9, 8, 1],
   ];
 
+  return { vertices, faces };
+}
+
+/** 60 near-equilateral triangles: five around each dodecahedron face center. */
+function createPentakisDodecahedron() {
+  // The dodecahedron as the icosahedron's dual: its corners are the
+  // icosahedron's face centers and its face centers the icosahedron's corners.
+  const { vertices, faces } = createIcosahedron();
+  const corners = faces.map(([a, b, c]) => vertices[a].clone().add(vertices[b]).add(vertices[c]));
+  return kisPolyhedron(corners, vertices, 5);
+}
+
+/** 24 isosceles triangles: four around each cube face center. */
+function createTetrakisHexahedron() {
+  const corners = [];
+  [-1, 1].forEach((x) => [-1, 1].forEach((y) => [-1, 1].forEach((z) => corners.push(new Vector3(x, y, z)))));
+  const centers = [];
+  [-1, 1].forEach((s) => {
+    centers.push(new Vector3(s, 0, 0), new Vector3(0, s, 0), new Vector3(0, 0, s));
+  });
+  return kisPolyhedron(corners, centers, 4);
+}
+
+/**
+ * Raise a point over every face of a polyhedron and fan triangles around it.
+ * Each face is found as the `sides` corners nearest its center direction,
+ * sorted around it. Triangles list the face center first and wind outward,
+ * matching the other base polyhedra.
+ */
+function kisPolyhedron(corners, centers, sides) {
+  const vertices = [...corners.map((v) => v.clone().normalize()), ...centers.map((v) => v.clone().normalize())];
+  const faces = [];
+  centers.forEach((_, c) => {
+    const centerIndex = corners.length + c;
+    const center = vertices[centerIndex];
+    const ring = vertices
+      .slice(0, corners.length)
+      .map((v, i) => ({ i, angle: v.angleTo(center) }))
+      .sort((a, b) => a.angle - b.angle)
+      .slice(0, sides)
+      .map(({ i }) => i);
+    const u = vertices[ring[0]].clone().sub(center).normalize();
+    const w = center.clone().cross(u);
+    ring.sort((a, b) => {
+      const pa = vertices[a].clone().sub(center);
+      const pb = vertices[b].clone().sub(center);
+      return Math.atan2(pa.dot(w), pa.dot(u)) - Math.atan2(pb.dot(w), pb.dot(u));
+    });
+    ring.forEach((a, k) => {
+      const b = ring[(k + 1) % sides];
+      const normal = vertices[a].clone().sub(center).cross(vertices[b].clone().sub(center));
+      faces.push(normal.dot(center) > 0 ? [centerIndex, a, b] : [centerIndex, b, a]);
+    });
+  });
   return { vertices, faces };
 }
 

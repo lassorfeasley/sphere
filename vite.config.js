@@ -6,4 +6,8 @@ export default defineConfig({
   optimizeDeps: {
     exclude: ['manifold-3d'],
   },
+  // The solid worker imports manifold-3d, which needs import.meta.url.
+  worker: {
+    format: 'es',
+  },
 });
