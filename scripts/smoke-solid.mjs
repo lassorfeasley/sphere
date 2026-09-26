@@ -21,7 +21,7 @@ const { segments, strandIds } = buildWovenSegments(connections, geometry, {
   amplitude: (0.32 * 2.5) / 30,
   minBendRadius: (3 * 1.25) / 30,
   bendRadius: 3 / 30,
-  loop: { height: 7 / 30, halfLength: 10 / 30 },
+  loop: { height: 7 / 30, angle: (70 * Math.PI) / 180, anchor: [0, 1, 0], minBend: 2.5 / 30, neck: 3.1 / 30 },
 });
 console.log('deduped sub-segments:', segments.length / 6);
 

@@ -31,7 +31,7 @@ export class HangSimulation {
     const bodies = new Map();
     const bodyOf = (id) => {
       if (!bodies.has(id)) {
-        bodies.set(id, { id, fixed: id === fixedPiece, points: [], keys: new Map(), segments: [] });
+        bodies.set(id, { id, fixed: id === fixedPiece, points: [], keys: new Map(), segments: [], sources: [] });
       }
       return bodies.get(id);
     };
@@ -47,6 +47,7 @@ export class HangSimulation {
         return body.keys.get(key);
       });
       body.segments.push(ends);
+      body.sources.push(i);
     }
 
     bodies.forEach((body) => {

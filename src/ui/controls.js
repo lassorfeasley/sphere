@@ -21,9 +21,9 @@ function readSections() {
   }
 }
 
-function writeSection(id, open) {
+function writeSections(states) {
   try {
-    localStorage.setItem(SECTION_STORAGE_KEY, JSON.stringify({ ...readSections(), [id]: open }));
+    localStorage.setItem(SECTION_STORAGE_KEY, JSON.stringify({ ...readSections(), ...states }));
   } catch {
     // Remembering open sections is best-effort.
   }
@@ -45,6 +45,8 @@ function perFrame(fn) {
 }
 
 const decimalsOf = (step) => (String(step).split('.')[1] ?? '').length;
+
+const SNAP_PX = 7;
 
 class Control {
   constructor(root) {
@@ -131,20 +133,32 @@ export class ControlGroup {
     return new ControlGroup(row, this.owner);
   }
 
-  /** A collapsible section; its open state is remembered across reloads. */
+  /**
+   * A collapsible section. Sections in the same group act as an accordion —
+   * at most one is open — and the open one is remembered across reloads.
+   */
   section(title, { id = title, open = true } = {}) {
-    const isOpen = readSections()[id] ?? open;
     const section = el('section', 'panel-section');
     const header = el('button', 'section-header', `<span>${title}</span>${icon('chevron')}`);
     header.type = 'button';
-    header.setAttribute('aria-expanded', String(isOpen));
     const body = el('div', 'section-body');
-    section.classList.toggle('collapsed', !isOpen);
     section.append(header, body);
+    const entry = {
+      id,
+      isOpen: () => !section.classList.contains('collapsed'),
+      setOpen: (isOpen) => {
+        section.classList.toggle('collapsed', !isOpen);
+        header.setAttribute('aria-expanded', String(isOpen));
+      },
+    };
+    this.sections ??= [];
+    const anotherOpen = this.sections.some((other) => other.isOpen());
+    entry.setOpen(!anotherOpen && (readSections()[id] ?? open));
+    this.sections.push(entry);
     header.addEventListener('click', () => {
-      const collapsed = section.classList.toggle('collapsed');
-      header.setAttribute('aria-expanded', String(!collapsed));
-      writeSection(id, !collapsed);
+      const opening = !entry.isOpen();
+      this.sections.forEach((other) => other.setOpen(other === entry && opening));
+      writeSections(Object.fromEntries(this.sections.map((other) => [other.id, other.isOpen()])));
     });
     this.el.appendChild(section);
     const group = new ControlGroup(body, this.owner);
@@ -198,9 +212,51 @@ export class ControlGroup {
     const range = el('input', 'slider');
     Object.assign(range, { type: 'range', min, max, step });
     range.setAttribute('aria-label', label);
-    body.append(head, range);
+    const track = el('div', 'slider-track');
+    const marksLayer = el('div', 'slider-marks');
+    track.append(marksLayer, range);
+    body.append(head, track);
     const { wrap, hintEl } = field(null, body, hint);
     const control = withHint(new Control(wrap), hintEl);
+
+    // Dragging near a mark snaps to it, within a few pixels but never so far
+    // that the spots between close marks become unreachable.
+    let snapPoints = [];
+    const snap = (v) => {
+      if (!snapPoints.length) {
+        return v;
+      }
+      const pixels = Math.max(1, range.clientWidth - 14);
+      let reach = (SNAP_PX / pixels) * (max - min);
+      for (let i = 1; i < snapPoints.length; i += 1) {
+        reach = Math.min(reach, (snapPoints[i] - snapPoints[i - 1]) / 4);
+      }
+      const nearest = snapPoints.reduce((best, p) => (Math.abs(p - v) < Math.abs(best - v) ? p : best));
+      return Math.abs(nearest - v) <= reach ? nearest : v;
+    };
+    const along = (v) => `calc(7px + (100% - 14px) * ${(v - min) / (max - min)})`;
+
+    /**
+     * Tick `marks` ({ value, major }) under the slider to snap to, and shade
+     * the track outside `bands` ([from, to] values), if given.
+     */
+    control.setMarks = (marks = [], bands = null) => {
+      snapPoints = marks.map((m) => m.value).sort((a, b) => a - b);
+      marksLayer.replaceChildren(
+        ...(bands ?? []).map(([from, to]) => {
+          const band = el('span', 'slider-band');
+          band.style.left = along(from);
+          band.style.width = `calc((100% - 14px) * ${(to - from) / (max - min)})`;
+          return band;
+        }),
+        ...marks.map(({ value, major }) => {
+          const tick = el('span', major ? 'slider-tick major' : 'slider-tick');
+          tick.style.left = along(value);
+          return tick;
+        }),
+      );
+      track.classList.toggle('has-bands', Boolean(bands));
+    };
 
     const beyondTitle = `Slider covers ${min}–${max}${unit ? ` ${unit}` : ''}; type any value from ${lo} to ${hi}.`;
     valueWrap.title = beyondTitle;
@@ -222,7 +278,21 @@ export class ControlGroup {
         value.value = format(Number(v));
       }
     };
-    range.addEventListener('input', () => set(Number(Number(range.value).toFixed(decimals))));
+    // Only pointer drags snap; arrow keys would never get past a mark.
+    let dragging = false;
+    range.addEventListener('pointerdown', () => {
+      dragging = true;
+    });
+    range.addEventListener('pointerup', () => {
+      dragging = false;
+    });
+    range.addEventListener('pointercancel', () => {
+      dragging = false;
+    });
+    range.addEventListener('input', () => {
+      const v = Number(Number(range.value).toFixed(decimals));
+      set(dragging ? snap(v) : v);
+    });
     value.addEventListener('change', () => {
       const n = parseFloat(value.value);
       if (Number.isFinite(n)) {

@@ -21,10 +21,11 @@ Open the printed local URL. The window has three parts:
 - **Left sidebar:** the surface (base polyhedron, frequency, diameter),
   struts, weave, hanging loop, appearance and quality settings, with
   **Generate solid** and **Export STL** pinned at the bottom. Sections
-  collapse, and every setting is remembered across reloads.
+  work as an accordion (one open at a time), and every setting is remembered
+  across reloads.
 - **Viewport:** a toolbar switches between *Faceted*, *Sphere*, and *Solid*
-  views (picking *Solid* generates the printable mesh if needed), resets the
-  camera, hides both panels (`F`), and opens the **Gallery** (`G`). Status
+  views (picking *Solid* generates the printable mesh if needed), toggles pan
+  mode (`P`, left-drag pans instead of orbiting), resets the camera, collapses the left (`[`) or right (`]`) panel or hides both (`F`), and opens the **Gallery** (`G`). Status
   messages appear in the bottom-left corner.
 - **Pattern panel (right):** the triangle editor.
 
@@ -53,33 +54,44 @@ starters replace only the pattern and surface.
 3. **Replicate across the sphere.** The triangle pattern is stamped onto every
    face of the geodesic sphere in barycentric coordinates, then resampled and
    projected onto the smooth sphere surface.
-4. **Generate a solid.** Every projected segment becomes a strut — either a
-   flat band whose outer face is flush with the sphere (the default, like the
-   original line spheres) or a round capsule. With round struts, the
-   optional hanging loop grows out of the pattern itself: the highest free
-   stretch of one line (no line ends or sharp corners) lifts off the sphere
-   in a smooth 7 mm arch that a ribbon can pass under. With flat bands, or
-   when no stretch is long enough, a small ring is attached at the top
-   instead.
+4. **Generate a solid.** Every projected segment becomes a strut centered on
+   the line. Its cross-section is a rounded rectangle set in the Struts
+   section: *Width* across the surface, *Height* out from it, and
+   *Roundness* from 0 (square edges) to 1 (fully rounded, so a circle when
+   width equals height and a pill shape otherwise). The *Round*, *Oval*, and
+   *Band* shape buttons are quick presets for common combinations. The
+   optional hanging loop always grows out of the pattern itself (see
+   below).
+
+   Settings and designs saved before the unified profile load as the
+   closest match: round struts keep their thickness as width and height,
+   and flat bands become a *Band* profile with weaving off. Bands are now
+   centered on the line rather than sitting flush below the sphere
+   surface, so their outer faces stand half a band height further out.
 
 ### Woven crossings
 
-With round struts, *Weave crossings* makes lines pass over and under each
+*Weave crossings* makes lines pass over and under each
 other like a basket weave. Every line is traced across the whole sphere,
 straight through each place where lines cross, and over/under is chosen so
 it alternates along every line. Where three or four lines cross at a single
 point they stack at evenly spaced heights instead of merging. Each strand's height eases smoothly
 between crossings and returns to the sphere at line ends and at junctions
-where lines meet without passing straight through. Crossing strands press into each other and
-are joined with a smooth fillet, like soft hoses under tension, so the print
+where lines meet without passing straight through. Crossing strands press into each other,
+flattening where they meet and bulging sideways like soft hoses, so the print
 stays in one piece. Where crossings are close together the weave gets
-shallower, so no strand bends tighter than three strut radii.
+shallower, so no strand bends tighter than the minimum bend (three strut
+radii when slack, down to one at full tension).
 
 *Over / under run* sets the weave rhythm: 1 is a plain weave (over one, under
 one), 2 a twill (over two, under two), and so on. With *Strands touch* on,
-*Tension* (0–1) sets how hard crossing
-strands press together: at 0 they just touch; at 1 they sink 70% into each
-other. Turn *Strands touch* off to set a *Minimum gap* between
+*Tension* (0–1) makes the strands behave like stretched elastic. At 0 they
+just touch and ease over each other in a soft wave. Raising it pulls them
+taut: they run straight between crossings and do their bending right at
+each crossing, wrapping tightly over the strand beneath or dipping sharply
+under the one above. They also press harder together, up to 40% overlap,
+and bulge more where they press. This is real geometry through the whole
+strut, not a surface effect. Turn *Strands touch* off to set a *Minimum gap* between
 crossing strands instead. Crossings much closer together than that spacing (tight knots) are
 stacked as one cluster, each strand holding its own level through it, so
 the gap holds even in dense knots of crossings (at the cost of strands
@@ -92,9 +104,59 @@ woven through each other still interlock like chain mail, but loose pieces
 can fall out. *Thickness* (Struts section) sets
 the strut diameter.
 
+### Hanging loop
+
+*Hanging loop* (Hanging section) lifts a stretch of one line of the main
+piece off the sphere, so the loop is part of the pattern rather than a
+separate ring. Seen from the side, the line leaves the surface on a
+fillet, arcs over the top, and lands again the same way, meeting the line
+smoothly at both feet. *Height* sets how far its centerline rises above
+the line. *Steepness* sets the angle it leaves the line at: low angles
+make a long, gentle rise, 90° gives steep sides, and past 90° the sides
+lean outward so the line curls into a closed ring. Steepness also sets the
+loop's footprint along the line (height ÷ tan(steepness ÷ 2)). The *Bump*,
+*Arch*, and *Ring* buttons are presets (45°, 90°, 150°; *Ring* also raises
+the height to at least 12 mm so the ring opens up). A ring's steepness is
+capped so its two legs stay apart where they cross under it.
+
+*Curl* is a different shape: the line climbs out at the steepness angle
+(20° to 60°), runs once around a perfect circle, and comes back down across
+its own way up, like a looped ribbon. Where the legs cross, one strut
+thickness above the line, they pass side by side with a small gap. To make
+room, the loop tilts slightly sideways, so it is round seen face-on and a
+gentle coil seen edge-on. *Rounding* sets how gradually it eases into each
+bend (where it leaves the line and where the legs meet the circle), so the
+bends flow instead of switching sharply from straight to curved. Very large
+rounding on a small curl also softens the circle itself. Around any loop,
+the strut's height follows the loop rather than always pointing away from
+the sphere, so flat bands don't twist where the loop stands upright. The
+circle takes whatever height the legs leave;
+if the height is too small for a circle at least one strut thick, the curl
+is raised to fit.
+
+The loop sits on one line of the main piece, by default the one passing
+nearest the top. *Pick a line* lets you choose another: the line nearest the
+pointer lights up, and a click puts the loop on it at the nearest point (a
+drag still orbits; Esc cancels). *Position* then slides the loop along that
+line. Its ticks mark the line's crossings (tall) and the points halfway
+between crossings, corners, and line ends (short), and a drag snaps to them.
+The shaded stretches of the slider are where the loop has room, and it
+moves to the nearest of them when set elsewhere. Hovering the slider
+highlights the line. *Top* puts the loop back at the top.
+
+The loop needs a straight stretch with no line ends or corners sharper than
+20°. If no straight stretch is long enough, it follows the bends of the line
+and keeps only its middle straight. If the chosen line is too short even
+for that, the loop moves to the nearest line with room. If it still doesn't fit, it is made
+steeper (up to 90°) and then lower. The note under the controls describes
+the loop as built, including the room left for a ribbon or the ring's
+opening, and says whenever it had to change or landed away from where it
+was placed.
+
 ### Hanging simulation
 
-*Simulate hanging* (Hanging section) hangs the ornament from its loop: the
+*Simulate hanging* (Hanging section) hangs the ornament from its loop,
+first turning it so the loop points up the screen: the
 piece carrying the loop stays put and every other piece drops under gravity
 as a rigid body of round struts until it rests on the struts holding it up.
 Pieces whose struts overlap in the design fuse when printed, so they are
@@ -106,16 +168,28 @@ pieces re-settle toward the new "down". Spin is paused while hanging. Inertia is
 simple damping, so treat the numbers as a guide to how loose a design is,
 not an exact prediction.
 
+### Strut finish
+
+*Strut finish* (Appearance) previews the struts and solid in plastic or a
+metal (silver, gold, rose gold, brass, copper, bronze, stainless steel,
+titanium, gunmetal), lit by a studio environment so the metals reflect.
+*Polish* runs from matte (0) through satin and polished to a mirror (1). It
+is only a preview: the exported STL is unchanged. With *Color separate
+pieces* on, a multi-piece design tints the metal by piece.
+
 ### Smoothing
 
-- *Joint fillet* (0–3) sets the size of the fillet wherever cylinders
-  meet or cross: 1.5 strut radii per unit, so up to 4.5. Large values
-  web neighboring strands together near junctions. While you edit, the Sphere view
-  shows plain cylinders; once edits pause, a coarse solid (with fillets) is
-  built in a background worker and swapped in, with a *Smoothing…* badge
-  while it builds. Turn off *Smooth preview* (Appearance) to keep the
-  cylinders. When *Color separate pieces* is coloring a multi-piece design,
-  the cylinders stay so each piece keeps its color.
+- *Joint fillet* (0–3) sets the size of the fillet at junctions, where three
+  or more lines meet and end: 1.5 strut radii per unit, so up to 4.5. Large
+  values web neighboring strands together. Many patterns have no junctions
+  (every meeting is a crossing), in which case it has no effect and its hint
+  says so.
+- *Crossing fillet* (Weave section, same scale) sets the fillet where lines
+  cross and merge, as *Joint fillet* does where they meet. It only applies
+  with *Weave crossings* off; woven strands pass over and under instead,
+  meeting in a pressed groove when they touch. The Sphere view always shows
+  plain struts; fillets, pressing and swell appear only in the solid you
+  generate.
 - *Corner rounding* rounds every corner where a line changes direction
   into a smooth curve of about that radius, shrunk where the neighboring
   lines are too short. 0 keeps sharp corners. The whole lattice is extracted as one level set of a signed distance
@@ -162,8 +236,9 @@ designs using *Rotate* or no symmetry are oriented consistently around it.
 - **Connectivity:** the note under the editor counts separate pieces. Lines
   only count as joined where they meet or cross, so lines that merely pass
   close to each other are reported as separate even if the struts touch.
-- **Strut size:** flat bands around 2.4 mm wide × 3 mm deep (or 2–3 mm round
-  struts) print reliably in FDM at 60–80 mm diameter.
+- **Strut size:** 2–3 mm round struts, or bands around 2.4 mm wide × 3 mm
+  high, print reliably in FDM at 60–80 mm diameter. The woven height of a
+  strand follows *Height*, so flat ovals weave more shallowly.
 - **Solid detail** (Quality section): the approximate output triangle edge length. Lower values
   give smoother struts and bigger files. 1.0 mm is a good default; drop to
   0.5 mm for a final export.
@@ -184,11 +259,11 @@ browsers.
 | `src/templateEditor.js` | The 2D triangle pattern editor (drawing, neighbor preview, persistence) |
 | `src/patternMapper.js` | Stamps the pattern onto mesh faces as flat line segments (dome view) |
 | `src/projection.js` | Projects the pattern and the geodesic faces onto the sphere; dedupes segments |
-| `src/solid.js` | SDF strut lattice (band or round profile, hanging loop) → watertight mesh via manifold-3d |
+| `src/solid.js` | SDF strut lattice (rounded-rectangle profile) → watertight mesh via manifold-3d |
 | `src/solidWorker.js`, `src/solidClient.js` | Runs solid builds in a Web Worker (cancellable) for the smooth preview and Generate solid |
 | `src/tubes.js` | Solid strut preview for the Sphere display mode |
 | `src/connectivity.js` | Counts how many separate pieces a pattern prints as |
-| `src/weave.js` | Traces lines into strands and assigns alternating over/under heights |
+| `src/weave.js` | Traces lines into strands, assigns alternating over/under heights, and grows the hanging loop out of one strand |
 | `src/hangSim.js` | Rigid-body simulation of loose pieces hanging from the loop |
 | `src/stl.js` | Binary STL serialization and download |
 | `src/surfaces.js` | Registry of target surfaces: their controls, base mesh, and summary |
@@ -210,4 +285,4 @@ browsers.
   is choosing consistent face orientations on irregular meshes. New surfaces
   register in `src/surfaces.js` (the Surface section shows a shape picker
   once there is more than one); projection, the sunken preview surface, and
-  the solid's hanging loop still assume a sphere.
+  loop placement still assume a sphere.

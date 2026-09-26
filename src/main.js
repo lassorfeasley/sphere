@@ -11,15 +11,21 @@ import {
   LineSegments,
   Mesh,
   MeshStandardMaterial,
+  MOUSE,
   PerspectiveCamera,
+  PMREMGenerator,
   Quaternion,
+  Raycaster,
   Scene,
-  TorusGeometry,
+  Sphere,
+  TOUCH,
   Uint32BufferAttribute,
+  Vector2,
   Vector3,
   WebGLRenderer,
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { SURFACES, getSurface } from './surfaces.js';
 import { TemplateEditor } from './templateEditor.js';
 import { buildPatternGeometry } from './patternMapper.js';
@@ -29,7 +35,8 @@ import {
   collectProjectedSegments,
   segmentsAlong,
 } from './projection.js';
-import { buildTubeGroup, disposeTubeGroup } from './tubes.js';
+import { buildTubeGroup, disposeTubeGroup, jointMaterial } from './tubes.js';
+import { DEFAULT_FINISH, DEFAULT_POLISH, FINISHES, applyFinish, isMetal, polishName } from './finishes.js';
 import { SolidWorker, isCancelled } from './solidClient.js';
 import { countPieces } from './connectivity.js';
 import { buildWovenSegments, measureClearance } from './weave.js';
@@ -37,19 +44,20 @@ import { HangSimulation } from './hangSim.js';
 import { downloadBinaryStl } from './stl.js';
 import {
   DEFAULT_PRINT,
+  crossingBlendMm,
+  describeLoop,
   effectiveBlendMm,
   gapMode,
-  hangingLoop,
   migratePrint,
-  needsRingLoop,
+  pressSwell,
   sceneScale,
   strutProfile,
-  strutThicknessMm,
   strutWidthMm,
   surfaceInset,
   weaveOptions,
 } from './printSettings.js';
 import { ControlGroup } from './ui/controls.js';
+import { createProfilePreview } from './ui/profilePreview.js';
 import { icon } from './ui/icons.js';
 import { DEFAULT_SURFACE_COLOR, Gallery, PATTERN_COLOR } from './gallery.js';
 
@@ -58,8 +66,9 @@ const SETTINGS_KEY = 'sphere-settings-v1';
 const RADIUS = 1;
 const EDGE_THRESHOLD_DEG = 18;
 const HELP_TEXT = 'Drag to orbit · Right-drag to pan · Scroll to zoom';
-// Pause after the last edit before the filleted preview starts building.
-const PREVIEW_DELAY_MS = 350;
+const PAN_HELP_TEXT = 'Pan mode: drag to pan · Right-drag to orbit · Scroll to zoom';
+let panMode = false;
+const helpText = () => (panMode ? PAN_HELP_TEXT : HELP_TEXT);
 
 const viewport = document.querySelector('#viewport');
 const statusEl = document.querySelector('#status');
@@ -69,7 +78,7 @@ const setStatus = (message, tone = 'info') => {
   statusEl.textContent = message;
   statusEl.dataset.tone = tone;
 };
-setStatus(HELP_TEXT);
+setStatus(helpText());
 
 const renderer = new WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -97,6 +106,11 @@ const rimLight = new DirectionalLight(0x6bc4ff, 0.4);
 rimLight.position.set(-4, -2, -4);
 scene.add(ambientLight, keyLight, rimLight);
 
+// Reflections for the strut finishes only; the guide surface keeps plain lighting.
+const pmrem = new PMREMGenerator(renderer);
+const studioEnvironment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+pmrem.dispose();
+
 const params = {
   surface: 'geodesic',
   color: DEFAULT_SURFACE_COLOR,
@@ -106,7 +120,8 @@ const params = {
   spin: true,
   showSphere: true,
   colorPieces: true,
-  smoothPreview: true,
+  finish: DEFAULT_FINISH,
+  polish: DEFAULT_POLISH,
 };
 
 // Each surface keeps its own settings, so switching surfaces and back
@@ -140,7 +155,10 @@ const restoreSettings = () => {
   if (!SURFACES[params.surface]) {
     params.surface = 'geodesic';
   }
-  // A solid is never saved, so always start in the preview.
+  if (!FINISHES[params.finish]) {
+    params.finish = DEFAULT_FINISH;
+  }
+  // A solid is never saved, so always start in the Sphere view.
   if (params.displayMode === 'solid') {
     params.displayMode = 'sphere';
   }
@@ -222,6 +240,7 @@ const PIECE_COLORS = [
 const pieceColor = (id) => PIECE_COLORS[id % PIECE_COLORS.length];
 const pieceMaterial = tubeMaterial.clone();
 pieceMaterial.color.set('#ffffff');
+pieceMaterial.vertexColors = true;
 
 const highlightMaterial = new MeshStandardMaterial({
   color: '#ff9f5a',
@@ -231,18 +250,13 @@ const highlightMaterial = new MeshStandardMaterial({
   roughness: 0.45,
 });
 
-const solidMaterial = new MeshStandardMaterial({
-  color: '#e8e8e2',
-  metalness: 0.05,
-  roughness: 0.55,
-  flatShading: false,
-});
+const SOLID_PLASTIC_COLOR = '#e8e8e2';
+const solidMaterial = new MeshStandardMaterial({ flatShading: false });
 
 let sphereMesh;
 let edgeLines;
 let patternLines;
 let projectedLines;
-let loopMesh;
 let highlightMesh;
 let displayedSegments = null;
 let displayedPieces = null;
@@ -296,6 +310,12 @@ const startHang = () => {
   }
 
   params.displayMode = 'sphere';
+  // Hang from the loop: turn the ornament so the loop points up the screen.
+  if (result.loop) {
+    const loopUp = new Vector3().fromArray(result.loop.top).normalize();
+    const screenUp = new Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+    sphereGroup.quaternion.setFromUnitVectors(loopUp, screenUp);
+  }
   // A spinning turntable would keep shifting gravity; pause it while hanging.
   hang.spinWas = params.spin;
   params.spin = false;
@@ -304,12 +324,14 @@ const startHang = () => {
   hang.running = true;
   hang.groups = sim.bodies.map((body) => {
     const segments = new Float32Array(body.segments.length * 6);
+    const ups = new Float32Array(body.segments.length * 3);
     body.segments.forEach(([a, b], i) => {
       body.points[a].toArray(segments, i * 6);
       body.points[b].toArray(segments, i * 6 + 3);
+      ups.set(result.ups.subarray(body.sources[i] * 3, body.sources[i] * 3 + 3), i * 3);
     });
     const color = pieceColor(body.id);
-    const group = buildTubeGroup(segments, profile, pieceMaterial, Array.from({ length: body.segments.length }, () => color));
+    const group = buildTubeGroup(segments, profile, pieceMaterial, Array.from({ length: body.segments.length }, () => color), ups);
     sphereGroup.add(group);
     return { body, group };
   });
@@ -321,7 +343,7 @@ const startHang = () => {
 const toggleHang = () => {
   if (hang.groups) {
     stopHang();
-    setStatus(HELP_TEXT);
+    setStatus(helpText());
   } else {
     startHang();
   }
@@ -389,11 +411,6 @@ const solidState = {
 };
 const solidWorker = new SolidWorker();
 
-// The Sphere view first shows fast cylinders, then swaps in a coarse solid
-// built in the background, which shows the joint fillets.
-const preview = { mesh: null, timer: 0, version: 0 };
-const previewWorker = new SolidWorker();
-
 // While loading a whole design, pattern edits wait for the one rebuild at the end.
 let batching = false;
 
@@ -450,6 +467,24 @@ const updateMaterial = () => {
   });
 };
 
+/** Apply the finish to every strut material, including the tubes' joint clones. */
+const updateFinish = () => {
+  const finish = { finish: params.finish, polish: params.polish, envMap: studioEnvironment };
+  [
+    [tubeMaterial, PATTERN_COLOR],
+    [pieceMaterial, '#ffffff'],
+    [solidMaterial, SOLID_PLASTIC_COLOR],
+  ].forEach(([m, plasticColor]) => applyFinish(m, { ...finish, plasticColor }));
+  [tubeMaterial, pieceMaterial].forEach((m) => {
+    const joint = jointMaterial(m);
+    applyFinish(joint, finish);
+    joint.color.copy(m.color);
+  });
+  polishControl?.setHint(
+    `${polishName(params.polish)}.${isMetal(params.finish) && params.colorPieces ? ' Separate pieces tint the metal; turn off Color separate pieces to see it plain.' : ''}`,
+  );
+};
+
 const updateModeVisibility = () => {
   const mode = params.displayMode;
   if (sphereMesh) {
@@ -465,18 +500,14 @@ const updateModeVisibility = () => {
     smoothSphere.visible = mode === 'sphere' && params.showSphere;
     smoothSphereEdges.visible = mode === 'sphere' && params.showSphere;
   }
-  const smooth = Boolean(preview.mesh);
   if (projectedLines) {
-    projectedLines.visible = mode === 'sphere' && !hang.groups && !smooth;
-  }
-  if (loopMesh) {
-    loopMesh.visible = mode === 'sphere' && !smooth;
-  }
-  if (preview.mesh) {
-    preview.mesh.visible = mode === 'sphere' && !hang.groups;
+    projectedLines.visible = mode === 'sphere' && !hang.groups;
   }
   if (highlightMesh) {
     highlightMesh.visible = mode === 'sphere' && !hang.groups;
+  }
+  if (strandFocus.mesh) {
+    strandFocus.mesh.visible = mode === 'sphere' && !hang.groups;
   }
   if (solidMesh) {
     solidMesh.visible = mode === 'solid';
@@ -484,7 +515,7 @@ const updateModeVisibility = () => {
 };
 
 // Any change to the pattern or sphere invalidates a previously generated
-// solid; drop it so the preview and STL can't go stale.
+// solid; drop it so the Solid view and STL can't go stale.
 const invalidateSolid = () => {
   solidWorker.cancel();
   solidState.meshData = null;
@@ -626,11 +657,6 @@ const rebuildProjectedOverlay = () => {
     disposeTubeGroup(projectedLines);
     projectedLines = null;
   }
-  if (loopMesh) {
-    sphereGroup.remove(loopMesh);
-    loopMesh.geometry.dispose();
-    loopMesh = null;
-  }
 
   displayedSegments = null;
   displayedPieces = null;
@@ -641,6 +667,11 @@ const rebuildProjectedOverlay = () => {
     displayedSegments = segments ?? null;
     displayedPieces = result?.pieces ?? null;
     displayedResult = result;
+    jointFilletControl?.setHint(
+      result?.junctions?.length
+        ? JOINT_FILLET_HINT
+        : `${JOINT_FILLET_HINT} This pattern has none: its lines only cross${printParams.weave ? '.' : ', so use Crossing fillet.'}`,
+    );
     colorEditorLines(result);
     reportClearance(result);
     if (segments) {
@@ -651,25 +682,16 @@ const rebuildProjectedOverlay = () => {
       smoothSphereEdges.scale.setScalar(shrink);
       const colored = params.colorPieces && result.pieces > 1;
       projectedLines = colored
-        ? buildTubeGroup(segments, profile, pieceMaterial, Array.from(result.pieceIds, pieceColor))
-        : buildTubeGroup(segments, profile, tubeMaterial);
+        ? buildTubeGroup(segments, profile, pieceMaterial, Array.from(result.pieceIds, pieceColor), result.ups)
+        : buildTubeGroup(segments, profile, tubeMaterial, null, result.ups);
       sphereGroup.add(projectedLines);
-      if (needsRingLoop(printParams, result)) {
-        const loop = hangingLoop(printParams, segments, RADIUS, scale);
-        loopMesh = new Mesh(new TorusGeometry(loop.majorRadius, loop.minorRadius, 12, 40), tubeMaterial);
-        loopMesh.position.fromArray(loop.center);
-        loopMesh.quaternion.copy(
-          new Quaternion().setFromUnitVectors(new Vector3(0, 0, 1), new Vector3().fromArray(loop.normal)),
-        );
-        sphereGroup.add(loopMesh);
-      }
     }
   } else {
     templateEditor?.setLineColors(null);
     templateEditor?.setClearance(null);
   }
-
-  schedulePreview();
+  updateLoopNote();
+  updateStrandHighlight({ force: true });
   updateHighlight();
 };
 
@@ -711,9 +733,12 @@ const solidArgs = (result, edgeLength) => {
     segments,
     sphereRadius,
     profile: strutProfile(printParams, 1),
-    loop: needsRingLoop(printParams, result) ? hangingLoop(printParams, segments, sphereRadius, 1) : null,
     strandIds: result.strandIds,
+    ups: result.ups,
     blendRadius: effectiveBlendMm(printParams),
+    crossingBlendRadius: crossingBlendMm(printParams),
+    pressSwell: pressSwell(printParams),
+    junctions: Float32Array.from(result.junctions, (v) => (v * sphereRadius) / RADIUS),
     edgeLength,
   };
 };
@@ -732,67 +757,6 @@ const meshGeometry = (meshData) => {
   geometry.setIndex(new Uint32BufferAttribute(meshData.triVerts, 1));
   geometry.computeVertexNormals();
   return geometry;
-};
-
-// Coarse enough to build in a fraction of a second, fine enough that round
-// struts still look round.
-const previewEdgeMm = () =>
-  Math.max(printParams.detailMm, Math.min(strutThicknessMm(printParams) * 0.45, printParams.diameterMm / 40));
-
-// Pieces colored separately keep the cylinders, which carry per-piece colors.
-const previewWanted = () =>
-  params.smoothPreview && displayedResult?.segments && !(params.colorPieces && displayedResult.pieces > 1);
-
-const clearPreview = () => {
-  if (preview.mesh) {
-    sphereGroup.remove(preview.mesh);
-    preview.mesh.geometry.dispose();
-    preview.mesh = null;
-  }
-};
-
-/**
- * Rebuild the filleted preview once edits pause. Geometry changes drop the
- * old preview at once so the cylinders show the new shape; with `keep`
- * (fillet-only changes) the old one stays up until the new one is ready.
- */
-const schedulePreview = ({ keep = false } = {}) => {
-  preview.version += 1;
-  const version = preview.version;
-  clearTimeout(preview.timer);
-  previewWorker.cancel();
-  previewBadge.hidden = true;
-  if (!keep || !previewWanted()) {
-    clearPreview();
-    updateModeVisibility();
-  }
-  if (!previewWanted()) {
-    return;
-  }
-  preview.timer = setTimeout(async () => {
-    previewBadge.hidden = false;
-    try {
-      const meshData = await previewWorker.run(solidArgs(displayedResult, previewEdgeMm()));
-      if (version !== preview.version) {
-        return;
-      }
-      clearPreview();
-      if (meshData.triangleCount) {
-        preview.mesh = new Mesh(meshGeometry(meshData), tubeMaterial);
-        sphereGroup.add(preview.mesh);
-      }
-      updateModeVisibility();
-    } catch (error) {
-      if (!isCancelled(error)) {
-        console.error(error);
-        setStatus('Smooth preview failed — showing cylinders. See the browser console.', 'warn');
-      }
-    } finally {
-      if (version === preview.version) {
-        previewBadge.hidden = true;
-      }
-    }
-  }, PREVIEW_DELAY_MS);
 };
 
 const generateSolid = async () => {
@@ -870,7 +834,7 @@ const changeDisplayMode = (mode) => {
   }
   if (mode !== 'sphere' && hang.groups) {
     stopHang();
-    setStatus(HELP_TEXT);
+    setStatus(helpText());
   }
   updateModeVisibility();
 };
@@ -885,6 +849,42 @@ const resetView = () => {
 const toggleFocus = () => {
   const focused = document.body.classList.toggle('focus-mode');
   focusButton.classList.toggle('active', focused);
+};
+
+const PANEL_STORAGE_KEY = 'sphere-ui-collapsed-panels';
+const readCollapsedPanels = () => {
+  try {
+    return JSON.parse(localStorage.getItem(PANEL_STORAGE_KEY)) ?? {};
+  } catch {
+    return {};
+  }
+};
+
+// Collapses one side panel; `collapsed` defaults to flipping the current state.
+const setPanelCollapsed = (side, collapsed = !document.body.classList.contains(`${side}-collapsed`)) => {
+  document.body.classList.toggle(`${side}-collapsed`, collapsed);
+  const { button, name } = panelToggles[side];
+  button.classList.toggle('active', collapsed);
+  button.title = `${collapsed ? 'Show' : 'Hide'} ${name}`;
+  try {
+    localStorage.setItem(PANEL_STORAGE_KEY, JSON.stringify({ ...readCollapsedPanels(), [side]: collapsed }));
+  } catch {
+    // Remembering collapsed panels is best-effort.
+  }
+};
+
+// Pan mode swaps the primary drag from orbiting to panning; orbit moves to right-drag.
+const togglePanMode = () => {
+  panMode = !panMode;
+  controls.mouseButtons = panMode
+    ? { LEFT: MOUSE.PAN, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.ROTATE }
+    : { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN };
+  controls.touches = panMode
+    ? { ONE: TOUCH.PAN, TWO: TOUCH.DOLLY_ROTATE }
+    : { ONE: TOUCH.ROTATE, TWO: TOUCH.DOLLY_PAN };
+  panButton.classList.toggle('active', panMode);
+  renderer.domElement.classList.toggle('pan-mode', panMode);
+  setStatus(helpText());
 };
 
 // ---------------------------------------------------------------------------
@@ -928,13 +928,17 @@ surfaceSection.slider(printParams, 'diameterMm', {
   max: 200,
   step: 1,
   unit: 'mm',
-  onChange: rebuildPatternOverlay,
+  onChange: () => {
+    rebuildPatternOverlay();
+    profilePreview.refresh();
+  },
 });
 
 const updateProfileControls = () => {
   runControl.show(printParams.weave);
   touchControl.show(printParams.weave);
   tensionControl.show(printParams.weave && printParams.strandsTouch);
+  crossingFilletControl.show(!printParams.weave);
   gapControl.show(printParams.weave && !printParams.strandsTouch);
 };
 
@@ -964,6 +968,10 @@ const onProfileChange = () => {
   rebuildPatternOverlay();
 };
 
+const JOINT_FILLET_HINT = 'Blends lines where three or more meet and end.';
+
+const onFilletChange = () => invalidateSolid();
+
 const strutSection = panel.section('Struts');
 strutSection.segmented(strutShape, 'preset', {
   label: 'Shape',
@@ -974,10 +982,11 @@ strutSection.segmented(strutShape, 'preset', {
   ],
   onChange: onProfileChange,
 });
+const profilePreview = strutSection.add(createProfilePreview(() => printParams));
 strutSection.slider(printParams, 'widthMm', {
   limits: [0.2, 40],
   label: 'Width',
-  min: 1,
+  min: 0.5,
   max: 8,
   step: 0.1,
   unit: 'mm',
@@ -987,7 +996,7 @@ strutSection.slider(printParams, 'widthMm', {
 strutSection.slider(printParams, 'heightMm', {
   limits: [0.2, 40],
   label: 'Height',
-  min: 1,
+  min: 0.5,
   max: 8,
   step: 0.1,
   unit: 'mm',
@@ -1012,17 +1021,14 @@ strutSection.slider(printParams, 'bendMm', {
   hint: 'Radius of the curve where a line changes direction. 0 keeps sharp corners.',
   onChange: rebuildPatternOverlay,
 });
-strutSection.slider(printParams, 'jointSmoothing', {
+const jointFilletControl = strutSection.slider(printParams, 'jointSmoothing', {
   limits: [0, 10],
   label: 'Joint fillet',
   min: 0,
   max: 3,
   step: 0.05,
-  hint: 'Blends strands where they meet or cross.',
-  onChange: () => {
-    invalidateSolid();
-    schedulePreview({ keep: true });
-  },
+  hint: JOINT_FILLET_HINT,
+  onChange: onFilletChange,
 });
 
 const weaveSection = panel.section('Weave');
@@ -1058,8 +1064,17 @@ const tensionControl = weaveSection.slider(printParams, 'tension', {
   min: 0,
   max: 1,
   step: 0.05,
-  hint: 'How hard crossing strands press together.',
+  hint: 'How taut the strands pull, like stretched elastic. Higher runs them straighter between crossings and wraps them tighter over each other, pressing harder into each other where they cross.',
   onChange: rebuildPatternOverlay,
+});
+const crossingFilletControl = weaveSection.slider(printParams, 'crossingSmoothing', {
+  limits: [0, 10],
+  label: 'Crossing fillet',
+  min: 0,
+  max: 3,
+  step: 0.05,
+  hint: 'Blends lines where they cross and merge, as Joint fillet does where they meet. Woven crossings pass over and under instead.',
+  onChange: onFilletChange,
 });
 const gapControl = weaveSection.slider(printParams, 'crossingGapMm', {
   limits: [0, 40],
@@ -1074,9 +1089,329 @@ const gapControl = weaveSection.slider(printParams, 'crossingGapMm', {
 const hangSection = panel.section('Hanging');
 hangSection.toggle(printParams, 'loop', {
   label: 'Hanging loop',
-  hint: 'Lifts a stretch of line near the top into an arch a ribbon can pass under.',
+  hint: 'Grows a loop for a ribbon or hook out of one line of the pattern.',
+  onChange: () => {
+    updateLoopControls();
+    if (!printParams.loop) {
+      setLoopPicking(false);
+    }
+    rebuildPatternOverlay();
+  },
+});
+const loopContainer = document.createElement('div');
+loopContainer.className = 'control-stack';
+hangSection.el.append(loopContainer);
+const loopGroup = hangSection.group(loopContainer);
+
+// Quick shapes set the steepness; a ring also needs some height to open up.
+// A curl is its own shape: its steepness is the angle its legs climb at.
+const LOOP_SHAPES = { bump: 45, arch: 90, ring: 150 };
+const CURL_ANGLE = 40;
+const RING_MIN_HEIGHT_MM = 12;
+const loopShape = {
+  get preset() {
+    if (printParams.loopCurl) {
+      return 'curl';
+    }
+    return Object.keys(LOOP_SHAPES).find((key) => Math.abs(LOOP_SHAPES[key] - printParams.loopAngle) < 0.5) ?? 'custom';
+  },
+  set preset(value) {
+    printParams.loopCurl = value === 'curl';
+    printParams.loopAngle = printParams.loopCurl ? CURL_ANGLE : LOOP_SHAPES[value];
+    if (value === 'ring' || value === 'curl') {
+      printParams.loopHeightMm = Math.max(printParams.loopHeightMm, RING_MIN_HEIGHT_MM);
+    }
+  },
+};
+const updateSteepnessHint = () => {
+  loopRoundingControl.show(printParams.loopCurl);
+  loopSteepnessControl.setHint(
+    printParams.loopCurl
+      ? 'The angle the curl climbs at before its legs cross (20° to 60°). Lower is longer and flatter; the round loop takes the rest of the height.'
+      : 'The angle the loop leaves the line at. Lower is longer and gentler; past 90° the sides lean out and the line curls into a ring.',
+  );
+};
+loopGroup.segmented(loopShape, 'preset', {
+  label: 'Shape',
+  options: [
+    { value: 'bump', label: 'Bump', title: 'A long, gentle rise out of the line' },
+    { value: 'arch', label: 'Arch', title: 'Steep sides, a ribbon passes under it' },
+    { value: 'ring', label: 'Ring', title: 'The line curls into a closed ring' },
+    { value: 'curl', label: 'Curl', title: 'The line crosses over itself into a round loop' },
+  ],
+  onChange: () => {
+    updateSteepnessHint();
+    onProfileChange();
+  },
+});
+loopGroup.slider(printParams, 'loopHeightMm', {
+  limits: [1, 100],
+  label: 'Height',
+  min: 3,
+  max: 30,
+  step: 0.5,
+  unit: 'mm',
+  hint: 'How far the loop rises above the line it grows from.',
+  onChange: onProfileChange,
+});
+const loopSteepnessControl = loopGroup.slider(printParams, 'loopAngle', {
+  limits: [10, 175],
+  label: 'Steepness',
+  min: 20,
+  max: 170,
+  step: 1,
+  unit: '°',
+  onChange: onProfileChange,
+});
+const loopRoundingControl = loopGroup.slider(printParams, 'loopRoundingMm', {
+  limits: [0, 50],
+  label: 'Rounding',
+  min: 0,
+  max: 15,
+  step: 0.5,
+  unit: 'mm',
+  hint: 'How gradually the curl eases into each bend, where it leaves the line and where its legs meet the circle. 0 keeps plain arcs, which meet with a visible crease on flat struts.',
+  onChange: onProfileChange,
+});
+updateSteepnessHint();
+const placeRow = loopGroup.inline();
+const placeLoopButton = placeRow.button({
+  label: 'Pick a line',
+  icon: 'target',
+  title: 'Click a line on the sphere to put the loop on it, then slide it along with Position',
+  onClick: () => setLoopPicking(!loopPick.active),
+});
+placeRow.button({
+  label: 'Top',
+  icon: 'reset',
+  title: 'Put the loop back at the top',
+  onClick: () => {
+    setLoopPicking(false);
+    placeLoop({ anchor: [0, 1, 0], strand: -1 });
+  },
+});
+
+const roundAnchor = (v) => Array.from(v, (x) => Number(x.toFixed(4)));
+
+// The slider reads where the loop landed until it is first dragged; from
+// then on it holds the loop to that fraction of its line.
+const loopPosition = {
+  get percent() {
+    const along = printParams.loopAlong >= 0 ? printParams.loopAlong : displayedResult?.loop?.along ?? 0;
+    return Number((along * 100).toFixed(1));
+  },
+  set percent(value) {
+    const loop = displayedResult?.loop;
+    if (loop) {
+      printParams.loopAnchor = roundAnchor(loop.foot);
+      printParams.loopStrand = loop.strandId;
+    }
+    printParams.loopAlong = value / 100;
+  },
+};
+const loopPositionControl = loopGroup.slider(loopPosition, 'percent', {
+  label: 'Position',
+  min: 0,
+  max: 100,
+  step: 0.1,
+  unit: '%',
   onChange: rebuildPatternOverlay,
 });
+loopPositionControl.el.addEventListener('pointerenter', () => setStrandFocus('slider', true));
+loopPositionControl.el.addEventListener('pointerleave', () => setStrandFocus('slider', false));
+loopPositionControl.el.addEventListener('focusin', () => setStrandFocus('sliderFocus', true));
+loopPositionControl.el.addEventListener('focusout', () => setStrandFocus('sliderFocus', false));
+const loopNote = loopGroup.note();
+
+const updateLoopControls = () => loopGroup.show(printParams.loop);
+
+const updateLoopNote = () => {
+  const show = printParams.loop && displayedResult?.segments;
+  const loop = displayedResult?.loop;
+  loopNote.set(
+    show ? describeLoop(printParams, loop, sceneScale(printParams, RADIUS)) : '',
+    show && (!loop || loop.adjusted || loop.moved) ? 'warn' : undefined,
+  );
+  loopPositionControl.show(Boolean(show && loop));
+  if (show && loop) {
+    const toPercent = (f) => f * 100;
+    const scale = sceneScale(printParams, RADIUS);
+    loopPositionControl.setMarks(
+      loop.marks.map(({ value, major }) => ({ value: toPercent(value), major })),
+      loop.free.map((band) => band.map(toPercent)),
+    );
+    loopPositionControl.setHint(
+      `Along a ${(loop.strandLength / scale).toFixed(0)} mm ${loop.closed ? 'closed ' : ''}line. ` +
+        'Ticks mark crossings and the points halfway between them; the shaded stretches have room for the loop.',
+    );
+    loopPositionControl.refresh();
+  }
+};
+
+const placeLoop = ({ anchor, strand, along = -1 }) => {
+  printParams.loopAnchor = anchor;
+  printParams.loopStrand = strand;
+  printParams.loopAlong = along;
+  saveSettings();
+  rebuildPatternOverlay();
+};
+
+// The line the loop sits on (or would, while picking) is drawn highlighted
+// while the pointer is over the Position slider or hovering while picking.
+const strandFocus = { slider: false, sliderFocus: false, hovered: -1, mesh: null, shown: null };
+
+const setStrandFocus = (key, value) => {
+  strandFocus[key] = value;
+  updateStrandHighlight();
+};
+
+const updateStrandHighlight = ({ force = false } = {}) => {
+  const result = displayedResult;
+  let strandId = -1;
+  if (loopPick.active) {
+    strandId = strandFocus.hovered;
+  } else if ((strandFocus.slider || strandFocus.sliderFocus) && result?.loop) {
+    strandId = result.loop.strandId;
+  }
+  const key = strandId >= 0 && result ? `${strandId}` : null;
+  if (!force && key === strandFocus.shown) {
+    return;
+  }
+  if (strandFocus.mesh) {
+    sphereGroup.remove(strandFocus.mesh);
+    disposeTubeGroup(strandFocus.mesh);
+    strandFocus.mesh = null;
+  }
+  strandFocus.shown = key;
+  if (key === null) {
+    return;
+  }
+  const { segments, strandIds, ups } = result;
+  const picked = [];
+  const pickedUps = [];
+  for (let i = 0; i < strandIds.length; i += 1) {
+    if (strandIds[i] === strandId) {
+      for (let k = 0; k < 6; k += 1) {
+        picked.push(segments[i * 6 + k]);
+      }
+      pickedUps.push(ups[i * 3], ups[i * 3 + 1], ups[i * 3 + 2]);
+    }
+  }
+  const profile = strutProfile(printParams, sceneScale(printParams, RADIUS));
+  const enlarged = {
+    halfWidth: profile.halfWidth * 1.15,
+    halfHeight: profile.halfHeight * 1.15,
+    corner: profile.corner * 1.15,
+  };
+  strandFocus.mesh = buildTubeGroup(new Float32Array(picked), enlarged, highlightMaterial, null, pickedUps);
+  sphereGroup.add(strandFocus.mesh);
+  updateModeVisibility();
+};
+
+// Picking a line: while picking, the line of the main piece nearest the
+// pointer lights up, and a click (not a drag, which still orbits) puts the
+// loop on it at the nearest point.
+const loopPick = { active: false, down: null, move: null };
+const raycaster = new Raycaster();
+const pickTarget = new Sphere(new Vector3(), RADIUS);
+
+const setLoopPicking = (active) => {
+  if (loopPick.active === active) {
+    return;
+  }
+  loopPick.active = active;
+  strandFocus.hovered = -1;
+  renderer.domElement.classList.toggle('picking', active);
+  placeLoopButton.setLabel(active ? 'Cancel' : 'Pick a line', active ? 'close' : 'target');
+  setStatus(active ? 'Click the line the loop should sit on · Esc to cancel' : helpText());
+  updateStrandHighlight();
+};
+
+/** The point on the sphere under the pointer, in the ornament's own frame, or null. */
+const sphereHit = (event) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const pointer = new Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1,
+  );
+  raycaster.setFromCamera(pointer, camera);
+  const ray = raycaster.ray.clone().applyMatrix4(sphereGroup.matrixWorld.clone().invert());
+  return ray.intersectSphere(pickTarget, new Vector3());
+};
+
+/** The strand of the main piece passing nearest `point`, with its closest point. */
+const nearestLoopStrand = (point) => {
+  const result = displayedResult;
+  if (!result?.segments) {
+    return null;
+  }
+  const { segments, strandIds, pieceIds } = result;
+  const a = new Vector3();
+  const b = new Vector3();
+  const closest = new Vector3();
+  let best = null;
+  for (let i = 0; i < strandIds.length; i += 1) {
+    if (pieceIds[i] !== 0) {
+      continue;
+    }
+    a.fromArray(segments, i * 6);
+    b.fromArray(segments, i * 6 + 3);
+    b.sub(a);
+    const lengthSq = b.lengthSq();
+    const t = lengthSq > 0 ? Math.min(1, Math.max(0, closest.subVectors(point, a).dot(b) / lengthSq)) : 0;
+    closest.copy(a).addScaledVector(b, t);
+    const distance = closest.distanceTo(point);
+    if (!best || distance < best.distance) {
+      best = { strandId: strandIds[i], point: closest.clone(), distance };
+    }
+  }
+  return best;
+};
+
+renderer.domElement.addEventListener('pointerdown', (event) => {
+  loopPick.down = loopPick.active && event.button === 0 ? { x: event.clientX, y: event.clientY } : null;
+});
+renderer.domElement.addEventListener('pointermove', (event) => {
+  if (!loopPick.active || event.buttons) {
+    return;
+  }
+  const queued = loopPick.move;
+  loopPick.move = event;
+  if (queued) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    const latest = loopPick.move;
+    loopPick.move = null;
+    if (!loopPick.active) {
+      return;
+    }
+    const hit = sphereHit(latest);
+    strandFocus.hovered = hit ? nearestLoopStrand(hit)?.strandId ?? -1 : -1;
+    updateStrandHighlight();
+  });
+});
+renderer.domElement.addEventListener('pointerleave', () => {
+  if (loopPick.active) {
+    setStrandFocus('hovered', -1);
+  }
+});
+renderer.domElement.addEventListener('pointerup', (event) => {
+  const { down } = loopPick;
+  loopPick.down = null;
+  if (!down || Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5) {
+    return;
+  }
+  const hit = sphereHit(event);
+  const picked = hit && nearestLoopStrand(hit);
+  if (!picked) {
+    setStatus('That missed the sphere. Click on a line, or press Esc to cancel.', 'warn');
+    return;
+  }
+  setLoopPicking(false);
+  placeLoop({ anchor: roundAnchor(picked.point.normalize().toArray()), strand: picked.strandId });
+});
+
 const hangButton = hangSection.button({
   label: 'Simulate hanging',
   icon: 'play',
@@ -1089,12 +1424,22 @@ viewSection.toggle(params, 'showSphere', { label: 'Show surface', onChange: upda
 viewSection.toggle(params, 'colorPieces', {
   label: 'Color separate pieces',
   hint: 'Pieces that print separately each get their own color.',
-  onChange: rebuildPatternOverlay,
+  onChange: () => {
+    rebuildPatternOverlay();
+    updateFinish();
+  },
 });
-viewSection.toggle(params, 'smoothPreview', {
-  label: 'Smooth preview',
-  hint: 'After edits pause, shows the printed shape with fillets instead of plain cylinders.',
-  onChange: () => schedulePreview(),
+viewSection.select(params, 'finish', {
+  label: 'Strut finish',
+  options: Object.entries(FINISHES).map(([value, { label }]) => ({ value, label })),
+  onChange: updateFinish,
+});
+const polishControl = viewSection.slider(params, 'polish', {
+  label: 'Polish',
+  min: 0,
+  max: 1,
+  step: 0.05,
+  onChange: updateFinish,
 });
 viewSection.toggle(params, 'spin', { label: 'Turntable spin' });
 viewSection.swatches(params, 'color', {
@@ -1129,10 +1474,7 @@ qualitySection.slider(printParams, 'detailMm', {
   step: 0.1,
   unit: 'mm',
   hint: 'Triangle size of the exported mesh. Lower is smoother but slower and larger.',
-  onChange: () => {
-    invalidateSolid();
-    schedulePreview({ keep: true });
-  },
+  onChange: invalidateSolid,
 });
 
 const exportBar = panel.group(document.querySelector('#export-bar')).inline();
@@ -1168,12 +1510,6 @@ panel.group(toolbarLeft).segmented(params, 'displayMode', {
   ],
   onChange: changeDisplayMode,
 });
-const previewBadge = document.createElement('div');
-previewBadge.className = 'preview-badge';
-previewBadge.hidden = true;
-previewBadge.textContent = 'Smoothing…';
-previewBadge.title = 'Building the filleted preview';
-toolbarLeft.append(previewBadge);
 
 const toolbarButton = (iconName, title, onClick, label) => {
   const button = document.createElement('button');
@@ -1185,9 +1521,21 @@ const toolbarButton = (iconName, title, onClick, label) => {
   toolbarRight.append(button);
   return button;
 };
+const leftPanelButton = toolbarButton('panel-left', '', () => setPanelCollapsed('left'));
+toolbarLeft.prepend(leftPanelButton);
+const panButton = toolbarButton('pan', 'Pan mode (P)', togglePanMode);
 toolbarButton('reset', 'Reset view', resetView);
 const focusButton = toolbarButton('focus', 'Hide panels (F)', toggleFocus);
 toolbarButton('gallery', 'Gallery (G)', () => gallery.toggle(), 'Gallery');
+const rightPanelButton = toolbarButton('panel-right', '', () => setPanelCollapsed('right'));
+
+const panelToggles = {
+  left: { button: leftPanelButton, name: 'settings ([)' },
+  right: { button: rightPanelButton, name: 'pattern editor (])' },
+};
+const collapsedPanels = readCollapsedPanels();
+setPanelCollapsed('left', Boolean(collapsedPanels.left));
+setPanelCollapsed('right', Boolean(collapsedPanels.right));
 
 // ---------------------------------------------------------------------------
 // Pattern editor and gallery
@@ -1208,7 +1556,7 @@ templateEditor = new TemplateEditor(document.querySelector('#template-root'), {
 const currentDesign = () => ({
   pattern: templateEditor.getPattern(),
   surface: { type: params.surface, ...currentSurfaceParams() },
-  appearance: { color: params.color },
+  appearance: { color: params.color, finish: params.finish, polish: params.polish },
   print: { ...printParams },
 });
 
@@ -1222,13 +1570,22 @@ const applyDesign = (design) => {
   if (design.appearance?.color) {
     params.color = design.appearance.color;
   }
+  if (FINISHES[design.appearance?.finish]) {
+    params.finish = design.appearance.finish;
+  }
+  if (typeof design.appearance?.polish === 'number') {
+    params.polish = design.appearance.polish;
+  }
   assignKnown(printParams, migratePrint(design.print));
   batching = true;
   templateEditor.loadPattern(design.pattern);
   batching = false;
   showSurfaceControls();
   updateProfileControls();
+  updateLoopControls();
+  updateSteepnessHint();
   updateMaterial();
+  updateFinish();
   panel.refresh();
   rebuildSphere();
   saveSettings();
@@ -1255,10 +1612,18 @@ window.addEventListener('keydown', (event) => {
   ) {
     return;
   }
-  if (event.key === 'g') {
+  if (event.key === 'Escape' && loopPick.active) {
+    setLoopPicking(false);
+  } else if (event.key === 'g') {
     gallery.toggle();
   } else if (event.key === 'f' && !gallery.isOpen) {
     toggleFocus();
+  } else if (event.key === 'p' && !gallery.isOpen) {
+    togglePanMode();
+  } else if (event.key === '[' && !gallery.isOpen) {
+    setPanelCollapsed('left');
+  } else if (event.key === ']' && !gallery.isOpen) {
+    setPanelCollapsed('right');
   }
 });
 
@@ -1288,8 +1653,10 @@ const animate = () => {
 };
 
 updateProfileControls();
+updateLoopControls();
 rebuildSphere();
 updateMaterial();
+updateFinish();
 resize();
 updateModeVisibility();
 animate();

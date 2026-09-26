@@ -6,11 +6,8 @@ import {
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
-  Quaternion,
   Scene,
   SphereGeometry,
-  TorusGeometry,
-  Vector3,
   WebGLRenderer,
 } from 'three';
 import { PRESETS, expandStrokes } from './templateSpace.js';
@@ -19,9 +16,7 @@ import { buildWovenSegments } from './weave.js';
 import { buildTubeGroup, disposeTubeGroup } from './tubes.js';
 import {
   DEFAULT_PRINT,
-  hangingLoop,
   migratePrint,
-  needsRingLoop,
   sceneScale,
   strutProfile,
   surfaceInset,
@@ -100,7 +95,6 @@ class ThumbnailRenderer {
     group.add(this.ball);
 
     let tubes = null;
-    let ring = null;
     const result = connections.length
       ? buildWovenSegments(connections, geometry, weaveOptions(print, { radius, samples: 10 }))
       : null;
@@ -110,13 +104,6 @@ class ThumbnailRenderer {
       tubes = buildTubeGroup(result.segments, profile, this.tubeMaterial);
       group.add(tubes);
       this.ball.scale.setScalar(radius - surfaceInset(result.segments, profile, radius));
-      if (needsRingLoop(print, result)) {
-        const loop = hangingLoop(print, result.segments, radius, scale);
-        ring = new Mesh(new TorusGeometry(loop.majorRadius, loop.minorRadius, 12, 40), this.tubeMaterial);
-        ring.position.fromArray(loop.center);
-        ring.quaternion.copy(new Quaternion().setFromUnitVectors(new Vector3(0, 0, 1), new Vector3().fromArray(loop.normal)));
-        group.add(ring);
-      }
     }
     geometry.dispose();
 
@@ -127,7 +114,6 @@ class ThumbnailRenderer {
     if (tubes) {
       disposeTubeGroup(tubes);
     }
-    ring?.geometry.dispose();
     return url;
   }
 }

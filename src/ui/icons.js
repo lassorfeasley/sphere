@@ -15,7 +15,11 @@ const paths = {
   close: '<path d="M4 4l8 8M12 4l-8 8"/>',
   chevron: '<path d="M4 6l4 4 4-4"/>',
   edit: '<path d="M9.5 3.5l3 3M3 13l.7-3.1L10.8 2.8a1 1 0 0 1 1.4 0l1 1a1 1 0 0 1 0 1.4L6.1 12.3z"/>',
+  pan: '<path d="M8 2v12M2 8h12M6 4l2-2 2 2M6 12l2 2 2-2M4 6 2 8l2 2M12 6l2 2-2 2"/>',
   reset: '<path d="M2.8 8a5.2 5.2 0 1 0 1.6-3.8"/><path d="M2.5 2.5v3h3"/>',
+  target: '<circle cx="8" cy="8" r="4.5"/><circle cx="8" cy="8" r="1"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2"/>',
+  'panel-left': '<rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M6 2.5v11"/>',
+  'panel-right': '<rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M10 2.5v11"/>',
 };
 
 export function icon(name) {

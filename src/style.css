@@ -84,7 +84,7 @@ button {
   min-height: 0;
   background: color-mix(in srgb, var(--panel) 94%, transparent);
   backdrop-filter: blur(12px);
-  transition: margin 0.28s var(--ease), opacity 0.2s;
+  transition: margin 0.28s var(--ease), opacity 0.2s, visibility 0.28s;
 }
 
 #sidebar {
@@ -97,14 +97,18 @@ button {
   border-left: 1px solid var(--border);
 }
 
-.focus-mode #sidebar {
+.focus-mode #sidebar,
+.left-collapsed #sidebar {
   margin-left: calc(-1 * var(--sidebar-width));
   opacity: 0;
+  visibility: hidden;
 }
 
-.focus-mode #pattern-panel {
+.focus-mode #pattern-panel,
+.right-collapsed #pattern-panel {
   margin-right: calc(-1 * var(--pattern-width));
   opacity: 0;
+  visibility: hidden;
 }
 
 .panel-header {
@@ -157,6 +161,14 @@ button {
   background: var(--panel);
 }
 
+.panel-footer .inline-row {
+  flex-wrap: wrap;
+}
+
+.panel-footer .inline-row > * {
+  flex: 1 1 auto;
+}
+
 #viewport {
   flex: 1;
   min-width: 0;
@@ -173,6 +185,16 @@ button {
 
 #scene-canvas:active {
   cursor: grabbing;
+}
+
+#scene-canvas.pan-mode,
+#scene-canvas.pan-mode:active {
+  cursor: move;
+}
+
+#scene-canvas.picking,
+#scene-canvas.picking:active {
+  cursor: crosshair;
 }
 
 /* -------------------------------------------------------- panel sections */
@@ -249,6 +271,36 @@ button {
   font-size: 12px;
   line-height: 1.45;
   color: var(--text-faint);
+}
+
+.profile-preview {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.profile-preview svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.profile-preview .pp-label {
+  fill: var(--text-dim);
+  font-size: 10px;
+}
+
+.profile-preview .pp-faint {
+  fill: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.profile-preview .pp-dim line {
+  stroke: var(--text-faint);
+  stroke-width: 1;
 }
 
 .note[data-tone='ok'] {
@@ -435,6 +487,46 @@ button {
   outline: none;
 }
 
+.slider-track {
+  position: relative;
+}
+
+.slider-marks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.slider-tick {
+  position: absolute;
+  top: 13px;
+  width: 1px;
+  height: 4px;
+  transform: translateX(-50%);
+  background: var(--text-faint);
+  opacity: 0.6;
+}
+
+.slider-tick.major {
+  top: 12px;
+  height: 6px;
+  width: 2px;
+  background: var(--text);
+  opacity: 0.7;
+}
+
+/* Bands mark where the value is usable; the rest of the track is shaded. */
+.slider-band {
+  position: absolute;
+  top: 3px;
+  height: 12px;
+  border-radius: 3px;
+  background: rgba(138, 229, 255, 0.12);
+}
+
+.slider-track.has-bands .slider {
+  --fill: 0% !important;
+}
 /* Segmented control */
 
 .segmented {
@@ -746,29 +838,6 @@ button {
 
 .toolbar-btn.active {
   color: var(--accent);
-}
-
-.preview-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 10px;
-  font-size: 12px;
-  color: var(--text-dim);
-  background: color-mix(in srgb, var(--panel) 70%, transparent);
-  backdrop-filter: blur(10px);
-}
-
-.preview-badge::before {
-  content: '';
-  width: 10px;
-  height: 10px;
-  border: 1.5px solid var(--accent);
-  border-right-color: transparent;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
 }
 
 .status {
