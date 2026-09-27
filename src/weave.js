@@ -1328,54 +1328,86 @@ function freeStretches(item, origin, fits) {
 }
 
 /**
- * The strand's path as a function of arc length s (radians), with every
- * interior corner replaced by a quadratic Bezier between points cut back
- * from the corner. The cut is bend·tan(θ/2), the tangent length of a circular
- * fillet of radius `bend` for a turn of θ, capped at 45% of either adjacent
- * edge so neighboring fillets never overlap. The curve meets both edges
- * tangentially, so the path stays smooth.
+ * The strand's path as a function of arc length s (radians), with corners
+ * replaced by quadratic Beziers between points cut back from the corner.
+ * The cut is bend·tan(θ/2), the tangent length of a circular fillet of
+ * radius `bend` for a turn of θ. Sharpest corners are rounded first, each
+ * reaching at most 45% of the way to the next corner at least
+ * `ROUNDING_PEER_SHARE` as sharp (or the strand's end) and never into a
+ * fillet already placed. So where two curves (flattened into many short,
+ * gently turning edges) meet at a kink, the fillet spans several edges and
+ * swallows their small corners instead of being capped by one short edge.
+ * The Bezier's middle point is where the path's tangents at both cut points
+ * meet, so it leaves and rejoins the path tangentially, curved or straight.
  */
 function roundedPath(strand, nodes, arc, bend, bends) {
   const length = arc[arc.length - 1];
   const count = strand.edges.length;
   const pos = (i) => nodes[strand.nodes[i]].pos;
+  const wrap = (s) => (strand.closed ? ((s % length) + length) % length : Math.min(length, Math.max(0, s)));
+  // Arc distance from a to b, the short way round on a closed strand.
+  const gap = (a, b) => {
+    const d = Math.abs(a - b);
+    return strand.closed ? Math.min(d, length - d) : d;
+  };
 
-  const straightAt = (s, target) => {
-    const wrapped = strand.closed ? ((s % length) + length) % length : Math.min(length, Math.max(0, s));
+  // The edge holding s; at a node, the one leaving it when `leaving` is set.
+  const edgeAt = (s, leaving) => {
+    const wrapped = wrap(s);
     let e = 0;
-    while (e < count - 1 && arc[e + 1] < wrapped) {
+    while (e < count - 1 && (leaving ? arc[e + 1] <= wrapped : arc[e + 1] < wrapped)) {
       e += 1;
     }
+    return e;
+  };
+  const straightAt = (s, target) => {
+    const e = edgeAt(s, false);
     const span = arc[e + 1] - arc[e];
-    const t = span > 0 ? (wrapped - arc[e]) / span : 0;
+    const t = span > 0 ? (wrap(s) - arc[e]) / span : 0;
     return target.lerpVectors(pos(e), pos(e + 1), t).normalize();
+  };
+  const tangentAlong = (s, point, leaving) => {
+    const e = edgeAt(s, leaving);
+    const t = new Vector3().subVectors(pos(e + 1), pos(e));
+    return t.addScaledVector(point, -t.dot(point)).normalize();
   };
 
   const corners = [];
   if (bend > 0) {
-    bends.forEach(({ index: i, prev, s, turn }) => {
-      if (turn < 1e-3) {
+    const sharp = bends.filter(({ turn }) => turn >= 1e-3).sort((a, b) => b.turn - a.turn);
+    sharp.forEach(({ index: i, s, turn }) => {
+      if (corners.some((c) => gap(s, c.s) < c.cut)) {
         return;
       }
-      const lengthIn = arc[i === 0 ? count : i] - arc[prev];
-      const lengthOut = arc[i + 1] - arc[i];
-      const cut = Math.min(bend * Math.tan(turn / 2), 0.45 * lengthIn, 0.45 * lengthOut);
-      const corner = {
-        s,
-        cut,
-        p0: straightAt(s - cut, new Vector3()),
-        p1: pos(i).clone(),
-        p2: straightAt(s + cut, new Vector3()),
-      };
-      corners.push(corner);
-      if (strand.closed && i === 0) {
-        corners.push({ ...corner, s: length });
+      let cut = bend * Math.tan(turn / 2);
+      if (!strand.closed) {
+        cut = Math.min(cut, 0.45 * s, 0.45 * (length - s));
       }
+      sharp.forEach((other) => {
+        if (other.index !== i && other.turn >= ROUNDING_PEER_SHARE * turn) {
+          cut = Math.min(cut, 0.45 * gap(s, other.s));
+        }
+      });
+      corners.forEach((c) => {
+        cut = Math.min(cut, gap(s, c.s) - c.cut);
+      });
+      if (cut <= 1e-9) {
+        return;
+      }
+      const p0 = straightAt(s - cut, new Vector3());
+      const p2 = straightAt(s + cut, new Vector3());
+      const t0 = tangentAlong(s - cut, p0, true);
+      const t2 = tangentAlong(s + cut, p2, false);
+      corners.push({ s, cut, p0, p1: filletControl(p0, t0, p2, t2) ?? pos(i).clone(), p2 });
     });
   }
+  // A fillet on a closed strand may straddle where s wraps round.
+  const placed = strand.closed
+    ? corners.flatMap((c) => [c, { ...c, s: c.s + length }, { ...c, s: c.s - length }])
+    : corners;
 
   return (s, target) => {
-    const corner = corners.find((c) => Math.abs(s - c.s) < c.cut);
+    const corner = placed.find((c) => Math.abs(s - c.s) < c.cut);
     if (!corner) {
       return straightAt(s, target);
     }
@@ -1387,6 +1419,33 @@ function roundedPath(strand, nodes, arc, bend, bends) {
       .addScaledVector(corner.p2, u * u)
       .normalize();
   };
+}
+
+/**
+ * Where the line through p0 along t0 meets the line reaching p2 along t2
+ * (midpoint of their closest approach), or null when they don't meet ahead
+ * of p0 and behind p2, as for near-parallel tangents or an S-bend.
+ */
+function filletControl(p0, t0, p2, t2) {
+  const w = new Vector3().subVectors(p0, p2);
+  const b = t0.dot(t2);
+  const denom = 1 - b * b;
+  if (denom < 1e-6) {
+    return null;
+  }
+  const d = t0.dot(w);
+  const e = t2.dot(w);
+  const along0 = (b * e - d) / denom;
+  const along2 = (e - b * d) / denom;
+  const chord = p0.distanceTo(p2);
+  if (along0 <= 0 || along2 >= 0 || along0 > 2 * chord || -along2 > 2 * chord) {
+    return null;
+  }
+  return p0
+    .clone()
+    .addScaledVector(t0, along0)
+    .add(p2.clone().addScaledVector(t2, along2))
+    .multiplyScalar(0.5);
 }
 
 /**
@@ -1414,6 +1473,9 @@ function tautEase(u, bendShare) {
 // span between crossings; slack (0) spreads the bend over the whole span.
 const TAUT_BEND_SHARE = 0.06;
 const TAUT_BEND_SAMPLES = 6;
+// A corner's rounding stops short of corners turning at least this share as
+// much; gentler ones in reach (such as a flattened curve's) are smoothed over.
+const ROUNDING_PEER_SHARE = 0.5;
 
 /**
  * With `taut` (0 to 1) set, give every span between knots the share of its

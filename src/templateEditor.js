@@ -1,14 +1,24 @@
 import {
-  GRID_SIZES,
+  GRID_MAX,
+  GRID_MIN,
   PRESETS,
   SYMMETRIES,
   barycentricToCartesian,
+  cartesianToBarycentric,
   expandStrokes,
+  flattenSegment,
+  flattenSegments,
+  inverseOp,
   junctionParams,
   latticePoints,
   lerpBary,
+  parseGrid,
+  pointAt,
+  sameSegment,
   samePoint,
   segmentIntersections,
+  strokesForSegments,
+  subSegment,
   templateTriangle,
 } from './templateSpace.js';
 import { icon } from './ui/icons.js';
@@ -23,6 +33,9 @@ const SNAP_RADIUS = 0.045;
 // neighboring dots stays clickable.
 const SNAP_FRACTION_OF_SPACING = 0.3;
 const LINE_HIT_RADIUS = 0.02;
+const BEND_HANDLE_RADIUS = 0.03;
+// Straight pieces per curve when hit-testing clicks against it.
+const HIT_SAMPLES = 32;
 
 export class TemplateEditor {
   constructor(rootEl, { onChange, onSelect } = {}) {
@@ -40,6 +53,7 @@ export class TemplateEditor {
     this.hover = null;
     this.cursor = null;
     this.selected = null;
+    this.bend = null;
     this.lineColors = null;
     this.mode = 'draw';
     this.lineWidth = 0;
@@ -61,8 +75,11 @@ export class TemplateEditor {
     modes.className = 'segmented';
     this.drawButton = makeButton('Draw', () => this.setMode('draw'), { icon: 'pen', className: 'segment' });
     this.selectButton = makeButton('Select', () => this.setMode('select'), { icon: 'cursor', className: 'segment' });
-    this.drawButton.title = 'Draw lines between dots (D)';
-    this.selectButton.title = 'Select lines to delete them (V, or hold Option while clicking)';
+    this.drawButton.title =
+      'Draw (D): drag between dots, or click dots in turn to chain lines. Esc ends a chain; hold Option to select.';
+    this.selectButton.title =
+      'Select (V): click a line for the part between junctions, again for the whole line. Delete removes it. ' +
+      'Drag the round handle to bend it through a dot (Shift bends freely).';
     modes.append(this.drawButton, this.selectButton);
     const undo = makeButton('', () => this.undo(), { icon: 'undo', className: 'icon-btn' });
     undo.title = 'Undo (⌘Z)';
@@ -78,23 +95,36 @@ export class TemplateEditor {
     this.symmetrySelect.addEventListener('change', () => {
       this.pushHistory();
       this.state.symmetry = this.symmetrySelect.value;
+      this.state.strokes = strokesForSegments(this.segments, this.state.symmetry);
+      this.selected = null;
       this.refresh();
     });
-    this.gridSelect = makeSelect(GRID_SIZES.map((n) => ({ value: String(n), label: `${n} per edge` })));
-    this.gridSelect.addEventListener('change', () => {
-      this.state.grid = Number(this.gridSelect.value);
-      this.refresh(false);
+    this.gridInput = document.createElement('input');
+    Object.assign(this.gridInput, { type: 'number', min: GRID_MIN, max: GRID_MAX, step: 1 });
+    this.gridInput.title = `Grid steps along each edge (${GRID_MIN}–${GRID_MAX})`;
+    this.gridInput.addEventListener('input', () => {
+      const grid = parseGrid(this.gridInput.value);
+      if (grid !== null && grid !== this.state.grid) {
+        this.state.grid = grid;
+        this.refresh(false);
+        this.persist();
+      }
     });
-    settings.append(labelled('Symmetry', this.symmetrySelect), labelled('Snap grid', this.gridSelect));
+    this.gridInput.addEventListener('change', () => this.syncControls());
+    const gridField = document.createElement('span');
+    gridField.className = 'number-field';
+    const gridUnit = document.createElement('span');
+    gridUnit.textContent = 'per edge';
+    gridField.append(this.gridInput, gridUnit);
+    settings.append(labelled('Symmetry', this.symmetrySelect), labelled('Snap grid', gridField));
 
-    this.hint = document.createElement('p');
-    this.hint.className = 'template-hint';
 
     this.editorSvg = svgEl('svg', { viewBox: EDITOR_VIEWBOX, id: 'triangle-editor' });
     this.gridLayer = svgEl('g');
     this.axisLayer = svgEl('g');
     this.segmentLayer = svgEl('g');
     this.snapLayer = svgEl('g');
+    this.handleLayer = svgEl('g');
     this.rubberBand = svgEl('line', { class: 'rubber-band' });
     this.editorSvg.append(
       svgEl('polygon', { points: trianglePoints(templateTriangle), class: 'template-outline' }),
@@ -103,6 +133,7 @@ export class TemplateEditor {
       this.segmentLayer,
       this.rubberBand,
       this.snapLayer,
+      this.handleLayer,
     );
     this.editorSvg.addEventListener('pointerdown', (event) => this.handlePointerDown(event));
     this.editorSvg.addEventListener('pointermove', (event) => this.handlePointerMove(event));
@@ -127,8 +158,7 @@ export class TemplateEditor {
     this.neighborWarning.className = 'note';
     this.neighborWarning.dataset.tone = 'warn';
     this.neighborWarning.textContent =
-      'Without kaleidoscope symmetry, faces on the sphere can be rotated relative to each other, ' +
-      'so lines may not meet at the edges the way this preview shows.';
+      'Without kaleidoscope symmetry, edges may not line up as shown.';
     neighbors.append(neighborTitle, this.neighborSvg, this.neighborWarning);
 
     this.connectivityNote = document.createElement('p');
@@ -152,18 +182,18 @@ export class TemplateEditor {
     exportButton.title = 'Download this pattern as JSON';
     files.append(importButton, exportButton, this.fileInput);
 
-    this.rootEl.append(tools, editorFrame, this.hint, notes, settings, neighbors, files);
+    this.rootEl.append(tools, editorFrame, notes, settings, neighbors, files);
   }
 
   syncControls() {
     this.symmetrySelect.value = this.state.symmetry;
-    this.gridSelect.value = String(this.state.grid);
+    this.gridInput.value = String(this.state.grid);
   }
 
   /** Recompute derived geometry and redraw; optionally notify the sphere. */
   refresh(emit = true) {
     this.segments = expandStrokes(this.state.strokes, this.state.symmetry);
-    this.snapTargets = this.computeSnapTargets();
+    this.snapTargets = this.computeSnapTargets(this.segments);
     this.renderGrid();
     this.renderAxes();
     this.renderSegments();
@@ -175,18 +205,18 @@ export class TemplateEditor {
     }
   }
 
-  computeSnapTargets() {
+  computeSnapTargets(segments) {
     const targets = latticePoints(this.state.grid).map((p) => ({ p, kind: 'grid' }));
     const add = (p, kind) => {
       if (!targets.some((t) => samePoint(t.p, p))) {
         targets.push({ p, kind });
       }
     };
-    this.segments.forEach(({ start, end }) => {
+    segments.forEach(({ start, end }) => {
       add(start, 'endpoint');
       add(end, 'endpoint');
     });
-    segmentIntersections(this.segments).forEach((p) => add(p, 'crossing'));
+    segmentIntersections(segments).forEach((p) => add(p, 'crossing'));
     return targets;
   }
 
@@ -220,8 +250,8 @@ export class TemplateEditor {
 
   renderSegments() {
     this.segmentLayer.innerHTML = '';
-    this.segments.forEach(({ start, end }, i) => {
-      const line = baryLine(start, end, 'pattern-line');
+    this.segments.forEach((segment, i) => {
+      const line = segmentEl(segment, 'pattern-line');
       if (this.lineColors?.[i]) {
         line.style.stroke = this.lineColors[i];
       }
@@ -233,17 +263,114 @@ export class TemplateEditor {
     const spans = selection
       ? this.segments
           .filter(({ source }) => source === selection.source)
-          .map(({ start, end }) => ({
-            start: lerpBary(start, end, selection.t0),
-            end: lerpBary(start, end, selection.t1),
-          }))
+          .map((segment) => subSegment(segment, selection.t0, selection.t1))
       : [];
-    spans.forEach(({ start, end }) => {
-      this.segmentLayer.appendChild(baryLine(start, end, 'pattern-line selected'));
+    spans.forEach((span) => {
+      this.segmentLayer.appendChild(segmentEl(span, 'pattern-line selected'));
     });
     if (typeof this.onSelect === 'function') {
-      this.onSelect(spans);
+      this.onSelect(spans.flatMap((span) => flattenSegment(span)));
     }
+  }
+
+  /** The bend handle of the selected line: its copy under the pointer, and that copy's midpoint. */
+  bendHandle() {
+    if (!this.selected) {
+      return null;
+    }
+    const { source, op } = this.selected;
+    const segment =
+      this.segments.find((seg) => seg.source === source && seg.op === op) ??
+      this.segments.find((seg) => seg.source === source);
+    return segment ? { segment, apex: pointAt(segment, 0.5) } : null;
+  }
+
+  bendHandleAt(point) {
+    const handle = this.bendHandle();
+    if (!handle) {
+      return null;
+    }
+    const { x, y } = barycentricToCartesian(handle.apex);
+    return Math.hypot(x - point.x, y - point.y) < BEND_HANDLE_RADIUS ? handle : null;
+  }
+
+  renderBendHandle() {
+    this.handleLayer.innerHTML = '';
+    const handle = this.bendHandle();
+    if (!handle) {
+      return;
+    }
+    if (this.bend) {
+      const { start, end, control } = handle.segment;
+      const corners = [start, control ?? lerpBary(start, end, 0.5), end].map(barycentricToCartesian);
+      this.handleLayer.appendChild(svgEl('polyline', { points: trianglePoints(corners), class: 'bend-guide' }));
+    }
+    const { x, y } = barycentricToCartesian(handle.apex);
+    this.handleLayer.appendChild(
+      svgEl('circle', { cx: x, cy: y, r: 0.014, class: this.bend ? 'bend-handle active' : 'bend-handle' }),
+    );
+  }
+
+  /**
+   * Start bending the selected line. The handle sits on the curve's midpoint
+   * and snaps to grid dots, line ends, and crossings of other lines, or back
+   * to the straight line's midpoint; only spots whose curve stays inside the
+   * triangle are offered.
+   */
+  startBend({ segment }) {
+    const { source } = this.selected;
+    const others = this.segments.filter((seg) => seg.source !== source);
+    const candidates = [...this.computeSnapTargets(others).map(({ p }) => p), lerpBary(segment.start, segment.end, 0.5)];
+    this.pushHistory();
+    this.pending = null;
+    this.hover = null;
+    this.selected = { source, t0: 0, t1: 1, op: segment.op };
+    this.bend = {
+      source,
+      segment,
+      invert: inverseOp(this.state.symmetry, segment.op),
+      targets: candidates.filter((apex) => bendControl(segment, apex) !== undefined),
+      changed: false,
+    };
+    this.renderSegments();
+    this.renderInteraction();
+  }
+
+  updateBend(point, free) {
+    const { source, segment, invert, targets } = this.bend;
+    let apex = null;
+    if (free) {
+      apex = cartesianToBarycentric(point);
+    } else {
+      let bestDist = Infinity;
+      targets.forEach((p) => {
+        const { x, y } = barycentricToCartesian(p);
+        const dist = Math.hypot(x - point.x, y - point.y);
+        if (dist < bestDist) {
+          apex = p;
+          bestDist = dist;
+        }
+      });
+    }
+    if (!apex) {
+      return;
+    }
+    const control = bendControl(segment, apex);
+    if (control === undefined) {
+      return;
+    }
+    const stroke = this.state.strokes[source];
+    const next = control ? invert(control) : null;
+    const current = stroke[2] ?? null;
+    if (next ? current && samePoint(current, next) : !current) {
+      return;
+    }
+    stroke.length = 2;
+    if (next) {
+      stroke.push(next);
+    }
+    this.bend.changed = true;
+    this.refresh(false);
   }
 
   renderInteraction() {
@@ -268,7 +395,17 @@ export class TemplateEditor {
     } else {
       setAttrs(this.rubberBand, { visibility: 'hidden' });
     }
-    this.editorSvg.style.cursor = this.hover ? 'crosshair' : this.mode === 'select' ? 'pointer' : 'default';
+    this.renderBendHandle();
+    const overHandle = this.cursor && this.bendHandleAt(this.cursor);
+    this.editorSvg.style.cursor = this.bend
+      ? 'grabbing'
+      : overHandle
+        ? 'grab'
+        : this.hover
+          ? 'crosshair'
+          : this.mode === 'select'
+            ? 'pointer'
+            : 'default';
   }
 
   /** Draw the pattern mirrored across each edge, as it appears on adjacent faces. */
@@ -284,17 +421,18 @@ export class TemplateEditor {
       this.neighborSvg.appendChild(
         svgEl('polygon', { points: trianglePoints(templateTriangle.map(reflect)), class: 'neighbor-outline' }),
       );
-      this.segments.forEach(({ start, end }) => {
+      this.segments.forEach(({ start, end, control }) => {
+        const mirrored = (p) => reflect(barycentricToCartesian(p));
         this.neighborSvg.appendChild(
-          cartLine(reflect(barycentricToCartesian(start)), reflect(barycentricToCartesian(end)), 'neighbor-line'),
+          shapeEl(mirrored(start), mirrored(end), control && mirrored(control), 'neighbor-line'),
         );
       });
     });
     this.neighborSvg.appendChild(
       svgEl('polygon', { points: trianglePoints(templateTriangle), class: 'template-outline' }),
     );
-    this.segments.forEach(({ start, end }) => {
-      this.neighborSvg.appendChild(baryLine(start, end, 'pattern-line'));
+    this.segments.forEach((segment) => {
+      this.neighborSvg.appendChild(segmentEl(segment, 'pattern-line'));
     });
   }
 
@@ -331,8 +469,8 @@ export class TemplateEditor {
   selectAt(point) {
     let hit = null;
     let bestDist = Math.max(LINE_HIT_RADIUS, this.lineWidth / 2);
-    this.segments.forEach(({ start, end }, index) => {
-      const { distance, t } = projectOntoSegment(point, barycentricToCartesian(start), barycentricToCartesian(end));
+    this.segments.forEach((segment, index) => {
+      const { distance, t } = closestOnSegment(point, segment);
       if (distance < bestDist) {
         hit = { index, t };
         bestDist = distance;
@@ -344,23 +482,24 @@ export class TemplateEditor {
     const cuts = junctionParams(this.segments)[hit.index];
     const t0 = Math.max(...cuts.filter((t) => t <= hit.t));
     const t1 = Math.min(...cuts.filter((t) => t >= hit.t));
-    const source = this.segments[hit.index].source;
+    const { source, op } = this.segments[hit.index];
     const current = this.selected;
     if (current && current.source === source && current.t0 === t0 && current.t1 === t1) {
-      return { source, t0: 0, t1: 1 };
+      return { source, t0: 0, t1: 1, op };
     }
-    return { source, t0, t1 };
+    return { source, t0, t1, op };
   }
 
   deleteSelection() {
     const { source, t0, t1 } = this.selected;
-    const [start, end] = this.state.strokes[source];
+    const [start, end, control] = this.state.strokes[source];
+    const segment = control ? { start, end, control } : { start, end };
     const remaining = [];
     if (t0 > 1e-6) {
-      remaining.push([{ ...start }, lerpBary(start, end, t0)]);
+      remaining.push(segmentStroke(subSegment(segment, 0, t0)));
     }
     if (t1 < 1 - 1e-6) {
-      remaining.push([lerpBary(start, end, t1), { ...end }]);
+      remaining.push(segmentStroke(subSegment(segment, t1, 1)));
     }
     this.pushHistory();
     this.state.strokes.splice(source, 1, ...remaining);
@@ -373,6 +512,12 @@ export class TemplateEditor {
       return;
     }
     const point = this.toLocal(event);
+    const handle = this.bendHandleAt(point);
+    if (handle) {
+      this.startBend(handle);
+      this.editorSvg.setPointerCapture(event.pointerId);
+      return;
+    }
     const selecting = this.mode === 'select' || event.altKey;
     const snap = selecting ? null : this.nearestSnap(point);
 
@@ -399,7 +544,13 @@ export class TemplateEditor {
 
   handlePointerMove(event) {
     this.cursor = this.toLocal(event);
-    this.hover = this.mode === 'select' || event.altKey ? null : this.nearestSnap(this.cursor);
+    if (this.bend) {
+      this.updateBend(this.cursor, event.shiftKey);
+      this.renderInteraction();
+      return;
+    }
+    const selecting = this.mode === 'select' || event.altKey;
+    this.hover = selecting || this.bendHandleAt(this.cursor) ? null : this.nearestSnap(this.cursor);
     this.renderInteraction();
   }
 
@@ -409,14 +560,21 @@ export class TemplateEditor {
     this.hover = null;
     this.drawButton.classList.toggle('active', mode === 'draw');
     this.selectButton.classList.toggle('active', mode === 'select');
-    this.hint.textContent =
-      mode === 'draw'
-        ? 'Drag between dots to draw a line, or click dots one after another to chain lines. Esc stops a chain; hold Option to select.'
-        : 'Click a line to select the part between junctions; click again for the whole line. Delete removes it.';
     this.renderInteraction();
   }
 
   handlePointerUp(event) {
+    if (this.bend) {
+      const { changed } = this.bend;
+      this.bend = null;
+      if (changed) {
+        this.emitChange();
+      } else {
+        this.history.pop();
+      }
+      this.renderInteraction();
+      return;
+    }
     if (!this.dragStart) {
       return;
     }
@@ -459,12 +617,7 @@ export class TemplateEditor {
   }
 
   addStroke(start, end) {
-    const exists = this.segments.some(
-      (seg) =>
-        (samePoint(seg.start, start) && samePoint(seg.end, end)) ||
-        (samePoint(seg.start, end) && samePoint(seg.end, start)),
-    );
-    if (exists) {
+    if (this.segments.some((seg) => sameSegment(seg, { start, end }))) {
       return;
     }
     this.pushHistory();
@@ -482,8 +635,8 @@ export class TemplateEditor {
     this.pushHistory();
     this.state = {
       symmetry: SYMMETRIES[symmetry] ? symmetry : 'kaleidoscope',
-      grid: GRID_SIZES.includes(grid) ? grid : this.state.grid,
-      strokes: strokes.map(([p, q]) => [{ ...p }, { ...q }]),
+      grid: parseGrid(grid) ?? this.state.grid,
+      strokes: strokes.map(copyStroke),
     };
     this.pending = null;
     this.selected = null;
@@ -521,9 +674,7 @@ export class TemplateEditor {
       this.connectivityNote.textContent = 'Prints as one connected piece.';
     } else {
       this.connectivityNote.textContent =
-        `Prints as ${pieces} separate pieces — some lines don't touch the rest. ` +
-        'Woven closed loops can still interlock like chain mail, but loose pieces that ' +
-        "aren't caught by the weave will fall out.";
+        `Prints as ${pieces} separate pieces. Loose ones not caught by the weave will fall out.`;
     }
   }
 
@@ -564,7 +715,7 @@ export class TemplateEditor {
   emitChange() {
     this.persist();
     if (typeof this.onChange === 'function') {
-      this.onChange({ connections: this.segments.map(({ start, end }) => ({ start, end })) });
+      this.onChange({ connections: flattenSegments(this.segments) });
     }
   }
 
@@ -578,8 +729,8 @@ export class TemplateEditor {
     }
     this.state = {
       symmetry: SYMMETRIES[data.symmetry] ? data.symmetry : 'kaleidoscope',
-      grid: GRID_SIZES.includes(data.grid) ? data.grid : 6,
-      strokes: data.strokes.map(([p, q]) => [{ ...p }, { ...q }]),
+      grid: parseGrid(data.grid) ?? 6,
+      strokes: data.strokes.map(copyStroke),
     };
     return true;
   }
@@ -598,7 +749,7 @@ export class TemplateEditor {
       if (raw) {
         this.loadData(JSON.parse(raw));
       } else {
-        this.state.strokes = PRESETS.lineSphere.strokes.map(([p, q]) => [{ ...p }, { ...q }]);
+        this.state.strokes = PRESETS.lineSphere.strokes.map(copyStroke);
         this.state.grid = PRESETS.lineSphere.grid;
       }
     } catch {
@@ -689,6 +840,76 @@ function cartLine(start, end, className) {
 
 function baryLine(p, q, className) {
   return cartLine(barycentricToCartesian(p), barycentricToCartesian(q), className);
+}
+
+/** A straight line, or a quadratic curve when `control` is given (Cartesian points). */
+function shapeEl(start, end, control, className) {
+  if (!control) {
+    return cartLine(start, end, className);
+  }
+  return svgEl('path', { d: `M${start.x} ${start.y}Q${control.x} ${control.y} ${end.x} ${end.y}`, class: className });
+}
+
+function segmentEl({ start, end, control }, className) {
+  return shapeEl(
+    barycentricToCartesian(start),
+    barycentricToCartesian(end),
+    control && barycentricToCartesian(control),
+    className,
+  );
+}
+
+/** A stroke `[start, end]` or `[start, end, control]` copied, ignoring any extra entries. */
+function copyStroke(stroke) {
+  return stroke.slice(0, 3).map((p) => ({ ...p }));
+}
+
+function segmentStroke({ start, end, control }) {
+  return control ? [start, end, control] : [start, end];
+}
+
+/**
+ * The control point that bends `segment` so its midpoint passes through
+ * `apex`; null when that leaves it straight, or undefined when the curve
+ * could leave the triangle, degenerate, or pass back through an endpoint.
+ */
+function bendControl({ start, end }, apex) {
+  if (samePoint(apex, start) || samePoint(apex, end)) {
+    return undefined;
+  }
+  const control = {
+    a: 2 * apex.a - (start.a + end.a) / 2,
+    b: 2 * apex.b - (start.b + end.b) / 2,
+    c: 2 * apex.c - (start.c + end.c) / 2,
+  };
+  if (control.a < -1e-9 || control.b < -1e-9 || control.c < -1e-9) {
+    return undefined;
+  }
+  const p0 = barycentricToCartesian(start);
+  const p1 = barycentricToCartesian(end);
+  const c = barycentricToCartesian(control);
+  const cross = (p1.x - p0.x) * (c.y - p0.y) - (p1.y - p0.y) * (c.x - p0.x);
+  if (Math.abs(cross) > 1e-9) {
+    return control;
+  }
+  return samePoint(apex, lerpBary(start, end, 0.5)) ? null : undefined;
+}
+
+function closestOnSegment(point, segment) {
+  if (!segment.control) {
+    return projectOntoSegment(point, barycentricToCartesian(segment.start), barycentricToCartesian(segment.end));
+  }
+  let best = { distance: Infinity, t: 0 };
+  let prev = barycentricToCartesian(segment.start);
+  for (let k = 1; k <= HIT_SAMPLES; k += 1) {
+    const next = barycentricToCartesian(pointAt(segment, k / HIT_SAMPLES));
+    const { distance, t } = projectOntoSegment(point, prev, next);
+    if (distance < best.distance) {
+      best = { distance, t: (k - 1 + t) / HIT_SAMPLES };
+    }
+    prev = next;
+  }
+  return best;
 }
 
 function projectOntoSegment(point, p1, p2) {

@@ -28,6 +28,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { SURFACES, getSurface } from './surfaces.js';
 import { TemplateEditor } from './templateEditor.js';
+import { pointAt } from './templateSpace.js';
 import { buildPatternGeometry } from './patternMapper.js';
 import {
   buildProjectedEdgeGeometry,
@@ -117,7 +118,6 @@ const params = {
   surfaceOpacity: 1,
   displayMode: 'sphere',
   projectionSamples: 12,
-  spin: true,
   showSphere: true,
   colorPieces: true,
   finish: DEFAULT_FINISH,
@@ -266,6 +266,13 @@ let displayedResult = null;
 // settle under gravity. `groups` holds one mesh group per rigid body.
 const hang = { sim: null, groups: null, running: false, spinWas: false };
 
+// Turntable spin is only offered in focus mode and is not persisted.
+let turntable = false;
+function setTurntable(on) {
+  turntable = on;
+  turntableButton.classList.toggle('active', on);
+}
+
 const stopHang = () => {
   if (hang.groups) {
     hang.groups.forEach(({ group }) => {
@@ -274,8 +281,7 @@ const stopHang = () => {
     });
   }
   if (hang.sim) {
-    params.spin = hang.spinWas;
-    panel.refresh();
+    setTurntable(hang.spinWas);
   }
   hang.sim = null;
   hang.groups = null;
@@ -317,8 +323,8 @@ const startHang = () => {
     sphereGroup.quaternion.setFromUnitVectors(loopUp, screenUp);
   }
   // A spinning turntable would keep shifting gravity; pause it while hanging.
-  hang.spinWas = params.spin;
-  params.spin = false;
+  hang.spinWas = turntable;
+  setTurntable(false);
   panel.refresh();
   hang.sim = sim;
   hang.running = true;
@@ -436,7 +442,7 @@ const rebuildSphere = () => {
   }
 
   const { faces } = surface.describe(currentSurfaceParams());
-  surfaceSummary?.set(`${faces.toLocaleString()} faces, each carrying one copy of the pattern.`);
+  surfaceSummary?.set(`${faces.toLocaleString()} faces`);
   rebuildSmoothSphere();
   rebuildPatternOverlay();
 };
@@ -481,7 +487,7 @@ const updateFinish = () => {
     joint.color.copy(m.color);
   });
   polishControl?.setHint(
-    `${polishName(params.polish)}.${isMetal(params.finish) && params.colorPieces ? ' Separate pieces tint the metal; turn off Color separate pieces to see it plain.' : ''}`,
+    `${polishName(params.polish)}.${isMetal(params.finish) && params.colorPieces ? ' Tinted by Color separate pieces.' : ''}`,
   );
 };
 
@@ -574,10 +580,8 @@ const colorEditorLines = (result) => {
   const { segments, pieceIds } = result;
   const mid = new Vector3();
   const probe = new Vector3();
-  const colors = templateEditor.segments.map(({ start, end }) => {
-    const a = (start.a + end.a) / 2;
-    const b = (start.b + end.b) / 2;
-    const c = (start.c + end.c) / 2;
+  const colors = templateEditor.segments.map((segment) => {
+    const { a, b, c } = pointAt(segment, 0.5);
     mid.set(0, 0, 0).addScaledVector(corners[0], a).addScaledVector(corners[1], b).addScaledVector(corners[2], c).normalize();
     let best = 0;
     let bestAngle = Infinity;
@@ -621,7 +625,7 @@ const reportClearance = (result) => {
     const r = Math.hypot(result.segments[i], result.segments[i + 1], result.segments[i + 2]);
     deepest = Math.max(deepest, RADIUS - r);
   }
-  const stack = ` Strands move up to ${(deepest / scale).toFixed(1)} mm off the sphere to keep clear.`;
+  const stack = ` Up to ${(deepest / scale).toFixed(1)} mm off the sphere.`;
   if (!closest) {
     templateEditor.setClearance(`Strands stay at least ${target.toFixed(1)} mm apart.${stack}`, false);
     return;
@@ -630,8 +634,8 @@ const reportClearance = (result) => {
   const short = gapMm < target - 0.05;
   templateEditor.setClearance(
     gapMm <= 0
-      ? `Some strands still touch or overlap (by ${(-gapMm).toFixed(1)} mm) — lines pass too close outside the weave.`
-      : `Closest gap between strands: ${gapMm.toFixed(1)} mm${short ? ` — below your ${target.toFixed(1)} mm minimum where lines pass close outside the weave.` : '.'}${stack}`,
+      ? `Some strands overlap by ${(-gapMm).toFixed(1)} mm outside the weave.`
+      : `Closest gap ${gapMm.toFixed(1)} mm${short ? `, below the ${target.toFixed(1)} mm minimum.` : '.'}${stack}`,
     short,
   );
 };
@@ -670,7 +674,7 @@ const rebuildProjectedOverlay = () => {
     jointFilletControl?.setHint(
       result?.junctions?.length
         ? JOINT_FILLET_HINT
-        : `${JOINT_FILLET_HINT} This pattern has none: its lines only cross${printParams.weave ? '.' : ', so use Crossing fillet.'}`,
+        : `${JOINT_FILLET_HINT} This pattern has none${printParams.weave ? '.' : '; use Crossing fillet.'}`,
     );
     colorEditorLines(result);
     reportClearance(result);
@@ -849,6 +853,9 @@ const resetView = () => {
 const toggleFocus = () => {
   const focused = document.body.classList.toggle('focus-mode');
   focusButton.classList.toggle('active', focused);
+  if (!focused) {
+    setTurntable(false);
+  }
 };
 
 const PANEL_STORAGE_KEY = 'sphere-ui-collapsed-panels';
@@ -968,7 +975,7 @@ const onProfileChange = () => {
   rebuildPatternOverlay();
 };
 
-const JOINT_FILLET_HINT = 'Blends lines where three or more meet and end.';
+const JOINT_FILLET_HINT = 'Blends lines where three or more meet.';
 
 const onFilletChange = () => invalidateSolid();
 
@@ -990,7 +997,6 @@ strutSection.slider(printParams, 'widthMm', {
   max: 8,
   step: 0.1,
   unit: 'mm',
-  hint: 'Across the surface.',
   onChange: onProfileChange,
 });
 strutSection.slider(printParams, 'heightMm', {
@@ -1000,7 +1006,7 @@ strutSection.slider(printParams, 'heightMm', {
   max: 8,
   step: 0.1,
   unit: 'mm',
-  hint: 'Out from the surface. Also sets how far woven strands rise and dip.',
+  hint: 'Also sets how far woven strands rise and dip.',
   onChange: onProfileChange,
 });
 strutSection.slider(printParams, 'roundness', {
@@ -1008,7 +1014,7 @@ strutSection.slider(printParams, 'roundness', {
   min: 0,
   max: 1,
   step: 0.05,
-  hint: '1 rounds the edges fully (circle, or pill when width and height differ); 0 keeps them square.',
+  hint: '1 is fully round, 0 is square.',
   onChange: onProfileChange,
 });
 strutSection.slider(printParams, 'bendMm', {
@@ -1018,7 +1024,7 @@ strutSection.slider(printParams, 'bendMm', {
   max: 15,
   step: 0.5,
   unit: 'mm',
-  hint: 'Radius of the curve where a line changes direction. 0 keeps sharp corners.',
+  hint: 'Bend radius where a line changes direction.',
   onChange: rebuildPatternOverlay,
 });
 const jointFilletControl = strutSection.slider(printParams, 'jointSmoothing', {
@@ -1034,7 +1040,6 @@ const jointFilletControl = strutSection.slider(printParams, 'jointSmoothing', {
 const weaveSection = panel.section('Weave');
 weaveSection.toggle(printParams, 'weave', {
   label: 'Weave crossings',
-  hint: 'Lines pass over and under each other instead of merging.',
   onChange: () => {
     updateProfileControls();
     rebuildPatternOverlay();
@@ -1048,12 +1053,11 @@ const runControl = weaveSection.segmented(printParams, 'weaveRun', {
     { value: 3, label: '3' },
     { value: 4, label: '4' },
   ],
-  hint: '1 is a plain weave (over one, under one); 2 a twill.',
   onChange: rebuildPatternOverlay,
 });
 const touchControl = weaveSection.toggle(printParams, 'strandsTouch', {
   label: 'Strands touch',
-  hint: 'Off keeps a minimum gap between crossing strands instead.',
+  hint: 'Off keeps a minimum gap between crossings.',
   onChange: () => {
     updateProfileControls();
     rebuildPatternOverlay();
@@ -1064,7 +1068,7 @@ const tensionControl = weaveSection.slider(printParams, 'tension', {
   min: 0,
   max: 1,
   step: 0.05,
-  hint: 'How taut the strands pull, like stretched elastic. Higher runs them straighter between crossings and wraps them tighter over each other, pressing harder into each other where they cross.',
+  hint: 'Higher pulls strands straighter and presses them tighter at crossings.',
   onChange: rebuildPatternOverlay,
 });
 const crossingFilletControl = weaveSection.slider(printParams, 'crossingSmoothing', {
@@ -1073,7 +1077,7 @@ const crossingFilletControl = weaveSection.slider(printParams, 'crossingSmoothin
   min: 0,
   max: 3,
   step: 0.05,
-  hint: 'Blends lines where they cross and merge, as Joint fillet does where they meet. Woven crossings pass over and under instead.',
+  hint: 'Blends lines where they cross.',
   onChange: onFilletChange,
 });
 const gapControl = weaveSection.slider(printParams, 'crossingGapMm', {
@@ -1089,7 +1093,6 @@ const gapControl = weaveSection.slider(printParams, 'crossingGapMm', {
 const hangSection = panel.section('Hanging');
 hangSection.toggle(printParams, 'loop', {
   label: 'Hanging loop',
-  hint: 'Grows a loop for a ribbon or hook out of one line of the pattern.',
   onChange: () => {
     updateLoopControls();
     if (!printParams.loop) {
@@ -1127,8 +1130,8 @@ const updateSteepnessHint = () => {
   loopRoundingControl.show(printParams.loopCurl);
   loopSteepnessControl.setHint(
     printParams.loopCurl
-      ? 'The angle the curl climbs at before its legs cross (20° to 60°). Lower is longer and flatter; the round loop takes the rest of the height.'
-      : 'The angle the loop leaves the line at. Lower is longer and gentler; past 90° the sides lean out and the line curls into a ring.',
+      ? 'Angle the curl climbs before its legs cross (20°–60°).'
+      : 'Angle the loop leaves the line at. Past 90° it becomes a ring.',
   );
 };
 loopGroup.segmented(loopShape, 'preset', {
@@ -1151,7 +1154,6 @@ loopGroup.slider(printParams, 'loopHeightMm', {
   max: 30,
   step: 0.5,
   unit: 'mm',
-  hint: 'How far the loop rises above the line it grows from.',
   onChange: onProfileChange,
 });
 const loopSteepnessControl = loopGroup.slider(printParams, 'loopAngle', {
@@ -1170,7 +1172,7 @@ const loopRoundingControl = loopGroup.slider(printParams, 'loopRoundingMm', {
   max: 15,
   step: 0.5,
   unit: 'mm',
-  hint: 'How gradually the curl eases into each bend, where it leaves the line and where its legs meet the circle. 0 keeps plain arcs, which meet with a visible crease on flat struts.',
+  hint: 'How gradually the curl eases into its bends.',
   onChange: onProfileChange,
 });
 updateSteepnessHint();
@@ -1242,7 +1244,7 @@ const updateLoopNote = () => {
     );
     loopPositionControl.setHint(
       `Along a ${(loop.strandLength / scale).toFixed(0)} mm ${loop.closed ? 'closed ' : ''}line. ` +
-        'Ticks mark crossings and the points halfway between them; the shaded stretches have room for the loop.',
+        'Ticks mark crossings and midpoints; shaded stretches fit the loop.',
     );
     loopPositionControl.refresh();
   }
@@ -1423,7 +1425,6 @@ const viewSection = panel.section('Appearance');
 viewSection.toggle(params, 'showSphere', { label: 'Show surface', onChange: updateModeVisibility });
 viewSection.toggle(params, 'colorPieces', {
   label: 'Color separate pieces',
-  hint: 'Pieces that print separately each get their own color.',
   onChange: () => {
     rebuildPatternOverlay();
     updateFinish();
@@ -1441,7 +1442,6 @@ const polishControl = viewSection.slider(params, 'polish', {
   step: 0.05,
   onChange: updateFinish,
 });
-viewSection.toggle(params, 'spin', { label: 'Turntable spin' });
 viewSection.swatches(params, 'color', {
   label: 'Surface color',
   colors: [DEFAULT_SURFACE_COLOR, '#2a2f3a', '#e8e4da', '#ff9fb2', '#9be8a8', '#b39dff'],
@@ -1463,7 +1463,7 @@ qualitySection.slider(params, 'projectionSamples', {
   min: 4,
   max: 32,
   step: 1,
-  hint: 'Points per pattern line when bending it onto the surface. Also used by the solid.',
+  hint: 'Points per line when bending it onto the surface.',
   onChange: rebuildPatternOverlay,
 });
 qualitySection.slider(printParams, 'detailMm', {
@@ -1473,7 +1473,7 @@ qualitySection.slider(printParams, 'detailMm', {
   max: 3,
   step: 0.1,
   unit: 'mm',
-  hint: 'Triangle size of the exported mesh. Lower is smoother but slower and larger.',
+  hint: 'Mesh triangle size. Lower is smoother but slower.',
   onChange: invalidateSolid,
 });
 
@@ -1525,6 +1525,8 @@ const leftPanelButton = toolbarButton('panel-left', '', () => setPanelCollapsed(
 toolbarLeft.prepend(leftPanelButton);
 const panButton = toolbarButton('pan', 'Pan mode (P)', togglePanMode);
 toolbarButton('reset', 'Reset view', resetView);
+const turntableButton = toolbarButton('turntable', 'Turntable spin (T)', () => setTurntable(!turntable));
+turntableButton.classList.add('focus-only');
 const focusButton = toolbarButton('focus', 'Hide panels (F)', toggleFocus);
 toolbarButton('gallery', 'Gallery (G)', () => gallery.toggle(), 'Gallery');
 const rightPanelButton = toolbarButton('panel-right', '', () => setPanelCollapsed('right'));
@@ -1620,6 +1622,8 @@ window.addEventListener('keydown', (event) => {
     toggleFocus();
   } else if (event.key === 'p' && !gallery.isOpen) {
     togglePanMode();
+  } else if (event.key === 't' && !gallery.isOpen && document.body.classList.contains('focus-mode')) {
+    setTurntable(!turntable);
   } else if (event.key === '[' && !gallery.isOpen) {
     setPanelCollapsed('left');
   } else if (event.key === ']' && !gallery.isOpen) {
@@ -1643,7 +1647,7 @@ new ResizeObserver(resize).observe(viewport);
 const animate = () => {
   requestAnimationFrame(animate);
 
-  if (params.spin) {
+  if (turntable) {
     sphereGroup.rotation.y += 0.001;
   }
 

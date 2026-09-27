@@ -259,11 +259,10 @@ button {
   color: var(--text-dim);
 }
 
-.field-hint {
-  margin: -1px 0 0;
-  font-size: 11.5px;
-  line-height: 1.45;
-  color: var(--text-faint);
+.has-hint {
+  cursor: help;
+  text-decoration: underline dotted var(--text-faint);
+  text-underline-offset: 3px;
 }
 
 .note {
@@ -682,6 +681,37 @@ button {
   box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
+.number-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  box-shadow: inset 0 0 0 1px var(--border);
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.number-field:hover {
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.number-field:focus-within {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.number-field input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 0 7px 10px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
 /* Buttons */
 
 .btn {
@@ -824,6 +854,10 @@ button {
   transition: color 0.15s, background 0.15s;
 }
 
+body:not(.focus-mode) .toolbar-btn.focus-only {
+  display: none;
+}
+
 .toolbar-btn.icon-only {
   width: 36px;
   padding: 0;
@@ -953,13 +987,6 @@ button {
   margin: 4px auto 0;
 }
 
-.template-hint {
-  margin: -4px 0 0;
-  font-size: 11.5px;
-  line-height: 1.45;
-  color: var(--text-faint);
-}
-
 .template-notes {
   display: flex;
   flex-direction: column;
@@ -1041,6 +1068,7 @@ button {
 }
 
 .pattern-line {
+  fill: none;
   stroke: var(--pattern);
   stroke-width: var(--line-width, 0.008);
   stroke-linecap: round;
@@ -1085,6 +1113,26 @@ button {
   r: 0.018;
 }
 
+.bend-handle {
+  fill: #ffffff;
+  stroke: #ff9f5a;
+  stroke-width: 0.005;
+  pointer-events: none;
+}
+
+.bend-handle.active {
+  fill: #ff9f5a;
+  stroke: #ffffff;
+}
+
+.bend-guide {
+  fill: none;
+  stroke: rgba(255, 159, 90, 0.5);
+  stroke-width: 0.003;
+  stroke-dasharray: 0.012 0.01;
+  pointer-events: none;
+}
+
 .neighbor-outline {
   fill: none;
   stroke: rgba(255, 255, 255, 0.1);
@@ -1092,6 +1140,7 @@ button {
 }
 
 .neighbor-line {
+  fill: none;
   stroke: rgba(254, 244, 180, 0.35);
   stroke-width: var(--line-width, 0.008);
   stroke-linecap: round;

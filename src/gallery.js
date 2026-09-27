@@ -10,7 +10,7 @@ import {
   SphereGeometry,
   WebGLRenderer,
 } from 'three';
-import { PRESETS, expandStrokes } from './templateSpace.js';
+import { PRESETS, expandStrokes, flattenSegments } from './templateSpace.js';
 import { getSurface } from './surfaces.js';
 import { buildWovenSegments } from './weave.js';
 import { buildTubeGroup, disposeTubeGroup } from './tubes.js';
@@ -85,10 +85,7 @@ class ThumbnailRenderer {
     const print = { ...DEFAULT_PRINT, ...migratePrint(design.print) };
     const surface = getSurface(design.surface?.type);
     const geometry = surface.createGeometry({ ...surface.defaults, ...design.surface }, radius);
-    const connections = expandStrokes(design.pattern.strokes, design.pattern.symmetry).map(({ start, end }) => ({
-      start,
-      end,
-    }));
+    const connections = flattenSegments(expandStrokes(design.pattern.strokes, design.pattern.symmetry));
     const group = new Group();
     this.surfaceMaterial.color.set(design.appearance?.color ?? DEFAULT_SURFACE_COLOR);
     this.ball.scale.setScalar(radius);

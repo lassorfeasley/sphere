@@ -61,27 +61,26 @@ class Control {
   refresh() {}
 }
 
-/** Wraps a control with a label above and an optional hint below. */
-function field(label, body, hint) {
+/** Wraps a control with an optional label above. */
+function field(label, body) {
   const wrap = el('div', 'field');
+  let labelEl = null;
   if (label) {
-    const text = el('div', 'field-label');
-    text.textContent = label;
-    wrap.append(text);
+    labelEl = el('div', 'field-label');
+    labelEl.textContent = label;
+    wrap.append(labelEl);
   }
   wrap.append(body);
-  const hintEl = el('p', 'field-hint');
-  hintEl.hidden = !hint;
-  hintEl.textContent = hint ?? '';
-  wrap.append(hintEl);
-  return { wrap, hintEl };
+  return { wrap, labelEl };
 }
 
-function withHint(control, hintEl) {
+/** Shows a control's hint as a tooltip on `target` (its label). */
+function withHint(control, target, hint) {
   control.setHint = (text) => {
-    hintEl.hidden = !text;
-    hintEl.textContent = text ?? '';
+    target.title = text ?? '';
+    target.classList.toggle('has-hint', Boolean(text));
   };
+  control.setHint(hint);
   return control;
 }
 
@@ -170,9 +169,10 @@ export class ControlGroup {
     const button = el('button', 'toggle', `<span class="toggle-label"></span><span class="switch"><span class="switch-thumb"></span></span>`);
     button.type = 'button';
     button.setAttribute('role', 'switch');
-    button.querySelector('.toggle-label').textContent = label;
-    const { wrap, hintEl } = field(null, button, hint);
-    const control = withHint(new Control(wrap), hintEl);
+    const labelEl = button.querySelector('.toggle-label');
+    labelEl.textContent = label;
+    const { wrap } = field(null, button);
+    const control = withHint(new Control(wrap), labelEl, hint);
     control.refresh = () => button.setAttribute('aria-checked', String(Boolean(obj[key])));
     button.addEventListener('click', () => {
       obj[key] = !obj[key];
@@ -216,8 +216,8 @@ export class ControlGroup {
     const marksLayer = el('div', 'slider-marks');
     track.append(marksLayer, range);
     body.append(head, track);
-    const { wrap, hintEl } = field(null, body, hint);
-    const control = withHint(new Control(wrap), hintEl);
+    const { wrap } = field(null, body);
+    const control = withHint(new Control(wrap), name, hint);
 
     // Dragging near a mark snaps to it, within a few pixels but never so far
     // that the spots between close marks become unreachable.
@@ -337,8 +337,8 @@ export class ControlGroup {
       bar.append(button);
       return button;
     });
-    const { wrap, hintEl } = field(label, bar, hint);
-    const control = withHint(new Control(wrap), hintEl);
+    const { wrap, labelEl } = field(label, bar);
+    const control = withHint(new Control(wrap), labelEl ?? wrap, hint);
     control.refresh = () =>
       buttons.forEach((button, i) => {
         const active = options[i].value === obj[key];
@@ -374,8 +374,8 @@ export class ControlGroup {
       grid.append(button);
       return button;
     });
-    const { wrap, hintEl } = field(label, grid, hint);
-    const control = withHint(new Control(wrap), hintEl);
+    const { wrap, labelEl } = field(label, grid);
+    const control = withHint(new Control(wrap), labelEl ?? wrap, hint);
     control.refresh = () =>
       buttons.forEach((button, i) => {
         const active = options[i].value === obj[key];
@@ -412,8 +412,8 @@ export class ControlGroup {
       control.refresh();
       fire();
     });
-    const { wrap, hintEl } = field(label, row);
-    const control = withHint(new Control(wrap), hintEl);
+    const { wrap, labelEl } = field(label, row);
+    const control = withHint(new Control(wrap), labelEl ?? wrap);
     control.refresh = () => {
       const current = String(obj[key]).toLowerCase();
       let matched = false;
@@ -441,8 +441,8 @@ export class ControlGroup {
       obj[key] = select.value;
       this.changed(onChange, select.value);
     });
-    const { wrap, hintEl } = field(label, select, hint);
-    const control = withHint(new Control(wrap), hintEl);
+    const { wrap, labelEl } = field(label, select);
+    const control = withHint(new Control(wrap), labelEl ?? wrap, hint);
     control.refresh = () => {
       select.value = obj[key];
     };

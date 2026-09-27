@@ -16,7 +16,7 @@ export const DEFAULT_PRINT = {
   jointSmoothing: 0.5,
   crossingSmoothing: 0.5,
   bendMm: 3,
-  loop: true,
+  loop: false,
   // The loop's centerline peak above the strand, the angle it leaves the
   // strand at (past 90° it curls into a ring), and where it sits: on the
   // strand passing nearest the anchor direction (the loop strand index breaks
@@ -24,9 +24,9 @@ export const DEFAULT_PRINT = {
   // when the fraction is negative.
   // A curl instead crosses over itself into a round loop, and the angle is
   // that of its legs; its rounding is the length over which its bends ease in.
-  loopHeightMm: 7,
-  loopAngle: 70,
-  loopCurl: false,
+  loopHeightMm: 12,
+  loopAngle: 40,
+  loopCurl: true,
   loopRoundingMm: 4,
   loopAnchor: [0, 1, 0],
   loopStrand: -1,
@@ -164,38 +164,36 @@ const loopOptions = (p, scale) => ({
  */
 export const describeLoop = (p, loop, scale) => {
   if (!loop) {
-    return 'No free stretch of line on the main piece is long enough for a loop. Lower the height or raise the steepness.';
+    return 'No room for a loop. Lower the height or raise the steepness.';
   }
   const mm = (v) => (v / scale).toFixed(1);
   const angle = Math.round((loop.angle * 180) / Math.PI);
   const thickness = strutThicknessMm(p) * scale;
-  const opening = `${mm(2 * loop.topRadius - thickness)} mm`;
-  const shape = loop.curl
-    ? `A curl rising ${mm(loop.height)} mm: the line crosses over itself ${mm(loop.crossHeight)} mm up and closes into a round loop with an opening about ${opening} across.`
-    : loop.angle > Math.PI / 2
-    ? `A ring rising ${mm(loop.height)} mm, with an opening about ${mm(2 * loop.topRadius - thickness)} mm across.`
-    : `An arch rising ${mm(loop.height)} mm over ${mm(2 * loop.halfLength)} mm of line, leaving ${mm(loop.height - thickness)} mm under it for a ribbon.`;
+  const shape =
+    loop.curl || loop.angle > Math.PI / 2
+      ? `${mm(loop.height)} mm tall, ${mm(2 * loop.topRadius - thickness)} mm opening.`
+      : `${mm(loop.height)} mm tall, ${mm(loop.height - thickness)} mm ribbon gap.`;
   const notes = [shape];
   if (loop.bent) {
-    notes.push('No straight stretch of line is long enough, so it follows the bends of the line.');
+    notes.push('Follows the bends of the line.');
   }
   if (loop.adjusted) {
     const lower = loop.height / scale < p.loopHeightMm - 0.05;
-    notes.push(`Made ${lower ? 'lower' : 'steeper'} (${angle}°) to fit the free stretch of line there.`);
+    notes.push(`Made ${lower ? 'lower' : 'steeper'} (${angle}°) to fit.`);
   } else if (Math.abs(angle - p.loopAngle) >= 1) {
     notes.push(
       loop.curl
-        ? `Steepness is held at ${angle}°: a curl's legs climb at 20° to 60°.`
-        : `Steepness is held at ${angle}° so the ring's legs stay apart; raise the height for a rounder ring.`,
+        ? `Steepness held at ${angle}° (curls climb 20°–60°).`
+        : `Steepness held at ${angle}°; raise the height for a rounder ring.`,
     );
   }
   if (loop.curl && loop.height / scale > p.loopHeightMm + 0.05) {
-    notes.push(`Raised to ${mm(loop.height)} mm, the least that fits a round loop at this strut size.`);
+    notes.push(`Raised to ${mm(loop.height)} mm to fit the curl.`);
   }
   if (loop.moved) {
-    notes.push(`The chosen line is too short for it, so it sits on the nearest line with room, ${mm(loop.offset)} mm away.`);
+    notes.push(`Moved to the nearest line with room, ${mm(loop.offset)} mm away.`);
   } else if (loop.offset / scale > LOOP_FAR_MM) {
-    notes.push(`Moved ${mm(loop.offset)} mm along the line to the nearest spot with room.`);
+    notes.push(`Moved ${mm(loop.offset)} mm along to fit.`);
   }
   return notes.join(' ');
 };
