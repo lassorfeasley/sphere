@@ -1,5 +1,6 @@
 import { BufferGeometry, Float32BufferAttribute, Vector3 } from 'three';
 import { barycentricToVector, readVertex } from './geometryUtils.js';
+import { onVariant } from './templateSpace.js';
 
 const v0 = new Vector3();
 const v1 = new Vector3();
@@ -22,6 +23,7 @@ export function buildPatternGeometry(connections, geometry) {
   const indexArray = indexAttr.array;
 
   const linePositions = [];
+  const variants = geometry.userData.faceVariant;
 
   for (let i = 0; i < indexArray.length; i += 3) {
     const ia = indexArray[i];
@@ -32,7 +34,11 @@ export function buildPatternGeometry(connections, geometry) {
     readVertex(ib, v1, positionsArray);
     readVertex(ic, v2, positionsArray);
 
+    const variant = variants?.[i / 3];
     connections.forEach((connection) => {
+      if (!onVariant(connection, variant)) {
+        return;
+      }
       const mappedA = barycentricToVector(connection.start, v0, v1, v2, tempPointA);
       const mappedB = barycentricToVector(connection.end, v0, v1, v2, tempPointB);
       linePositions.push(

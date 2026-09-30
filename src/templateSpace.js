@@ -13,7 +13,8 @@ export const templateTriangle = [
  * Symmetry groups of the equilateral triangle, as permutations of the
  * barycentric weights. Only the full dihedral group (D3) guarantees that
  * strokes meet across shared edges regardless of how adjacent mesh faces
- * are oriented.
+ * are oriented. Mirror, across the line from corner a to the far edge's
+ * midpoint, is enough on bases that fan triangles around face centers.
  */
 export const SYMMETRIES = {
   kaleidoscope: {
@@ -35,6 +36,13 @@ export const SYMMETRIES = {
       (p) => ({ a: p.c, b: p.a, c: p.b }),
     ],
   },
+  mirror: {
+    label: 'Mirror (2×)',
+    ops: [
+      (p) => ({ a: p.a, b: p.b, c: p.c }),
+      (p) => ({ a: p.a, b: p.c, c: p.b }),
+    ],
+  },
   none: {
     label: 'Off',
     ops: [(p) => ({ a: p.a, b: p.b, c: p.c })],
@@ -52,7 +60,7 @@ export function parseGrid(value) {
 
 /**
  * Starter patterns, defined as strokes to be expanded with kaleidoscope
- * symmetry. Names describe what they form once tiled across the sphere.
+ * symmetry unless they name another. Names describe what they form once tiled across the sphere.
  * `grid` and `sphere` are the settings the preset was designed for.
  */
 export const PRESETS = {
@@ -80,6 +88,34 @@ export const PRESETS = {
       [bary(1, 1, 1), bary(2, 1, 0)],
       [bary(2, 1, 0), bary(2, 0, 1)],
     ],
+  },
+  // Mirror presets, drawn in one wedge of a polygon face (corner a is the
+  // face center, edge bc the polygon's edge).
+  stars: {
+    label: 'Stars',
+    symmetry: 'mirror',
+    strokes: [[bary(0, 1, 1), bary(1, 1, 0)]],
+    grid: 4,
+  },
+  // Needs open pentagons: `sideStrokes` fill the wedges facing them.
+  triStars: {
+    label: 'Tri-Stars',
+    symmetry: 'mirror',
+    strokes: [
+      [bary(1, 1, 0), bary(0, 2, 1)],
+      [bary(0, 2, 1), bary(0, 1, 2)],
+    ],
+    sideStrokes: [[bary(1, 1, 0), bary(1, 0, 1), bary(4, 1, 1)]],
+    grid: 6,
+  },
+  linkedRings: {
+    label: 'Linked Rings',
+    symmetry: 'mirror',
+    strokes: [
+      [bary(1, 1, 0), bary(1, 0, 1)],
+      [bary(2, 1, 1), bary(0, 1, 1)],
+    ],
+    grid: 4,
   },
 };
 
@@ -256,10 +292,38 @@ export function strokesForSegments(segments, symmetry) {
 }
 
 /**
+ * The straight lines a pattern stamps onto the surface. With `split` and
+ * separate `sideStrokes`, lines carry a `variant`: 0 for faces taking the
+ * main design, 1 for faces taking the side design.
+ */
+export function patternConnections({ symmetry, strokes, sideStrokes }, split = false) {
+  const main = flattenSegments(expandStrokes(strokes, symmetry));
+  if (!split || !sideStrokes) {
+    return main;
+  }
+  const side = flattenSegments(expandStrokes(sideStrokes, symmetry));
+  return [...main.map((c) => ({ ...c, variant: 0 })), ...side.map((c) => ({ ...c, variant: 1 }))];
+}
+
+/** Whether connection `c` is stamped on a face of `variant` (lines without one go everywhere). */
+export function onVariant(c, variant) {
+  return c.variant === undefined || c.variant === (variant ?? 0);
+}
+
+/**
  * Split segments wherever they cross or where one ends on another, so that
- * every junction becomes a shared endpoint.
+ * every junction becomes a shared endpoint. Segments of different variants
+ * go on different faces, so they only split each other's own kind.
  */
 export function splitAtJunctions(segments) {
+  if (segments.some((seg) => seg.variant !== undefined)) {
+    const variants = [...new Set(segments.map((seg) => seg.variant))];
+    return variants.flatMap((variant) =>
+      splitAtJunctions(segments.filter((seg) => seg.variant === variant).map(({ variant: _, ...seg }) => seg)).map(
+        (piece) => ({ ...piece, variant }),
+      ),
+    );
+  }
   const cuts = junctionParams(segments);
   const result = [];
   segments.forEach(({ start, end }, i) => {

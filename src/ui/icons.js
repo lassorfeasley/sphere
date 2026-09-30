@@ -12,6 +12,7 @@ const paths = {
   play: '<path d="M5 3.2v9.6L12.5 8z"/>',
   stop: '<rect x="4" y="4" width="8" height="8" rx="1"/>',
   plus: '<path d="M8 3v10M3 8h10"/>',
+  minus: '<path d="M3 8h10"/>',
   close: '<path d="M4 4l8 8M12 4l-8 8"/>',
   chevron: '<path d="M4 6l4 4 4-4"/>',
   edit: '<path d="M9.5 3.5l3 3M3 13l.7-3.1L10.8 2.8a1 1 0 0 1 1.4 0l1 1a1 1 0 0 1 0 1.4L6.1 12.3z"/>',

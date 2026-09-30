@@ -93,8 +93,42 @@ button {
 }
 
 #pattern-panel {
+  position: relative;
   width: var(--pattern-width);
   border-left: 1px solid var(--border);
+}
+
+.panel-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  z-index: 3;
+  width: 8px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.panel-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.panel-resizer:hover::after,
+.resizing .panel-resizer::after {
+  opacity: 0.6;
+}
+
+.resizing {
+  cursor: ew-resize;
+  user-select: none;
 }
 
 .focus-mode #sidebar,
@@ -948,6 +982,11 @@ body:not(.focus-mode) .toolbar-btn.focus-only {
   margin-right: 4px;
 }
 
+.split-bar .segment {
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
 .template-settings {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
@@ -963,6 +1002,9 @@ body:not(.focus-mode) .toolbar-btn.focus-only {
 }
 
 .editor-frame {
+  position: relative;
+  flex: none;
+  overflow: hidden;
   border-radius: var(--radius);
   background: radial-gradient(circle at 50% 30%, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015));
   box-shadow: inset 0 0 0 1px var(--border), inset 0 1px 10px rgba(0, 0, 0, 0.35);
@@ -979,6 +1021,45 @@ body:not(.focus-mode) .toolbar-btn.focus-only {
   aspect-ratio: 1.12 / 0.99;
   touch-action: none;
   user-select: none;
+}
+
+.zoom-controls {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.zoom-controls .icon-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.zoom-controls .icon-btn:disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.zoom-label {
+  min-width: 44px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.zoom-label:hover {
+  color: var(--text);
 }
 
 #neighbor-preview {
@@ -1050,21 +1131,119 @@ body:not(.focus-mode) .toolbar-btn.focus-only {
 
 /* SVG editor contents */
 
+/* --k is 1 / zoom, so editor chrome keeps its on-screen size when zoomed. */
 .template-outline {
   fill: rgba(157, 222, 255, 0.04);
   stroke: rgba(255, 255, 255, 0.35);
-  stroke-width: 0.006;
+  stroke-width: calc(0.006 * var(--k, 1));
+}
+
+.hex-outline {
+  fill: rgba(157, 222, 255, 0.02);
+  stroke: rgba(255, 255, 255, 0.22);
+  stroke-width: calc(0.006 * var(--k, 1));
+}
+
+.wedge-copies {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+#triangle-editor:not(.hex-view) .hex-outline,
+#triangle-editor:not(.hex-view) .wedge-copies,
+#triangle-editor:not(.hex-view) .wedge-tints,
+#triangle-editor:not(.hex-view) .edge-marks {
+  display: none;
+}
+
+/* What each hexagon edge faces: --faces-hex and --faces-pent, also the
+   swatches on the split buttons. */
+#template-root {
+  --faces-hex: #8ae5ff;
+  --faces-pent: #ffb86b;
+  --spoke-link: #b39dff;
+}
+
+.wedge-tint.hex {
+  fill: color-mix(in srgb, var(--faces-hex) 7%, transparent);
+}
+
+.wedge-tint.pent {
+  fill: color-mix(in srgb, var(--faces-pent) 9%, transparent);
+}
+
+.edge-mark {
+  stroke-width: calc(0.012 * var(--k, 1));
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.edge-mark.hex {
+  stroke: var(--faces-hex);
+}
+
+.edge-mark.pent {
+  stroke: var(--faces-pent);
+}
+
+.edge-mark.open {
+  stroke-dasharray: calc(0.025 * var(--k, 1)) calc(0.02 * var(--k, 1));
+}
+
+.neighbor-glyph {
+  stroke-width: calc(0.006 * var(--k, 1));
+}
+
+.neighbor-glyph.hex {
+  fill: color-mix(in srgb, var(--faces-hex) 35%, transparent);
+  stroke: var(--faces-hex);
+}
+
+.neighbor-glyph.pent {
+  fill: color-mix(in srgb, var(--faces-pent) 35%, transparent);
+  stroke: var(--faces-pent);
+}
+
+.neighbor-glyph.open {
+  fill: none;
+  stroke-dasharray: calc(0.012 * var(--k, 1)) calc(0.01 * var(--k, 1));
+}
+
+.spoke-link {
+  stroke: var(--spoke-link);
+  stroke-width: calc(0.006 * var(--k, 1));
+  stroke-dasharray: calc(0.015 * var(--k, 1)) calc(0.012 * var(--k, 1));
+  pointer-events: none;
+}
+
+.split-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.split-swatch.same {
+  display: none;
+}
+
+.split-swatch.main {
+  background: var(--faces-hex);
+}
+
+.split-swatch.side {
+  background: var(--faces-pent);
 }
 
 .grid-line {
   stroke: rgba(255, 255, 255, 0.07);
-  stroke-width: 0.003;
+  stroke-width: calc(0.003 * var(--k, 1));
 }
 
 .mirror-axis {
   stroke: rgba(138, 229, 255, 0.25);
-  stroke-width: 0.003;
-  stroke-dasharray: 0.015 0.012;
+  stroke-width: calc(0.003 * var(--k, 1));
+  stroke-dasharray: calc(0.015 * var(--k, 1)) calc(0.012 * var(--k, 1));
 }
 
 .pattern-line {
@@ -1080,8 +1259,8 @@ body:not(.focus-mode) .toolbar-btn.focus-only {
 
 .rubber-band {
   stroke: var(--accent);
-  stroke-width: 0.005;
-  stroke-dasharray: 0.02 0.012;
+  stroke-width: calc(0.005 * var(--k, 1));
+  stroke-dasharray: calc(0.02 * var(--k, 1)) calc(0.012 * var(--k, 1));
   stroke-linecap: round;
   pointer-events: none;
 }
@@ -1089,7 +1268,7 @@ body:not(.focus-mode) .toolbar-btn.focus-only {
 .snap-dot {
   fill: rgba(255, 255, 255, 0.45);
   stroke: rgba(5, 6, 8, 0.8);
-  stroke-width: 0.004;
+  stroke-width: calc(0.004 * var(--k, 1));
   pointer-events: none;
 }
 
@@ -1101,22 +1280,23 @@ body:not(.focus-mode) .toolbar-btn.focus-only {
   fill: rgba(255, 159, 90, 0.8);
 }
 
+.snap-dot.port {
+  fill: var(--spoke-link);
+}
+
 .snap-dot.hover {
   fill: var(--accent);
-  r: 0.016;
 }
 
 .snap-dot.active {
   fill: var(--accent);
   stroke: #ffffff;
-  stroke-width: 0.004;
-  r: 0.018;
 }
 
 .bend-handle {
   fill: #ffffff;
   stroke: #ff9f5a;
-  stroke-width: 0.005;
+  stroke-width: calc(0.005 * var(--k, 1));
   pointer-events: none;
 }
 
@@ -1128,8 +1308,8 @@ body:not(.focus-mode) .toolbar-btn.focus-only {
 .bend-guide {
   fill: none;
   stroke: rgba(255, 159, 90, 0.5);
-  stroke-width: 0.003;
-  stroke-dasharray: 0.012 0.01;
+  stroke-width: calc(0.003 * var(--k, 1));
+  stroke-dasharray: calc(0.012 * var(--k, 1)) calc(0.01 * var(--k, 1));
   pointer-events: none;
 }
 

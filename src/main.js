@@ -189,7 +189,7 @@ restoreSettings();
 const patternSegments = () =>
   buildWovenSegments(
     patternState.connections,
-    sphereMesh.geometry,
+    patternBase,
     weaveOptions(printParams, { radius: RADIUS, samples: params.projectionSamples }),
   );
 
@@ -254,6 +254,9 @@ const SOLID_PLASTIC_COLOR = '#e8e8e2';
 const solidMaterial = new MeshStandardMaterial({ flatShading: false });
 
 let sphereMesh;
+// The faces the pattern is stamped on: the sphere mesh, or a copy with some
+// faces left open.
+let patternBase;
 let edgeLines;
 let patternLines;
 let projectedLines;
@@ -423,7 +426,14 @@ let batching = false;
 const rebuildSphere = () => {
   const surface = getSurface(params.surface);
   const geometry = surface.createGeometry(currentSurfaceParams(), RADIUS);
+  if (templateEditor) {
+    templateEditor.setFaceLayout(surface.faceLayout?.(currentSurfaceParams()) ?? null);
+    patternState.connections = templateEditor.getConnections();
+  }
 
+  if (patternBase && patternBase !== sphereMesh?.geometry) {
+    patternBase.dispose();
+  }
   if (!sphereMesh) {
     sphereMesh = new Mesh(geometry, material);
     sphereGroup.add(sphereMesh);
@@ -431,6 +441,7 @@ const rebuildSphere = () => {
     sphereMesh.geometry.dispose();
     sphereMesh.geometry = geometry;
   }
+  patternBase = surface.patternGeometry?.(geometry, currentSurfaceParams()) ?? geometry;
 
   const newEdges = new EdgesGeometry(geometry, EDGE_THRESHOLD_DEG);
   if (!edgeLines) {
@@ -548,7 +559,7 @@ const rebuildPatternOverlay = () => {
   }
 
   if (sphereMesh && patternState.connections.length) {
-    const patternGeometry = buildPatternGeometry(patternState.connections, sphereMesh.geometry);
+    const patternGeometry = buildPatternGeometry(patternState.connections, patternBase);
     if (patternGeometry) {
       patternLines = new LineSegments(patternGeometry, patternMaterial);
       sphereGroup.add(patternLines);
@@ -574,9 +585,11 @@ const colorEditorLines = (result) => {
     templateEditor.setLineColors(null);
     return;
   }
-  const positions = sphereMesh.geometry.getAttribute('position');
-  const index = sphereMesh.geometry.getIndex();
-  const corners = [0, 1, 2].map((k) => new Vector3().fromBufferAttribute(positions, index.getX(k)));
+  const positions = patternBase.getAttribute('position');
+  const index = patternBase.getIndex();
+  const variant = templateEditor.activeVariant;
+  const face = variant === undefined ? 0 : Math.max(0, patternBase.userData.faceVariant?.indexOf(variant) ?? 0);
+  const corners = [0, 1, 2].map((k) => new Vector3().fromBufferAttribute(positions, index.getX(face * 3 + k)));
   const { segments, pieceIds } = result;
   const mid = new Vector3();
   const probe = new Vector3();
@@ -644,13 +657,14 @@ const updateEditorFeedback = () => {
   if (!templateEditor || !sphereMesh) {
     return;
   }
-  templateEditor.setConnectivity(displayedPieces ?? countPieces(patternState.connections, sphereMesh.geometry));
+  templateEditor.setConnectivity(displayedPieces ?? countPieces(patternState.connections, patternBase));
 
-  // Editor units are one face edge; use the first face as a representative size.
+  // Editor units are one face edge; use the first face as a representative
+  // size. Its second and third corners span a polygon edge on every base.
   const positions = sphereMesh.geometry.getAttribute('position');
   const index = sphereMesh.geometry.getIndex();
-  const a = new Vector3().fromBufferAttribute(positions, index.getX(0));
-  const b = new Vector3().fromBufferAttribute(positions, index.getX(1));
+  const a = new Vector3().fromBufferAttribute(positions, index.getX(1));
+  const b = new Vector3().fromBufferAttribute(positions, index.getX(2));
   const edgeMm = (a.distanceTo(b) / RADIUS) * (printParams.diameterMm / 2);
   templateEditor.setLineWidth(strutWidthMm(printParams) / edgeMm);
 };
@@ -710,7 +724,7 @@ const updateHighlight = () => {
     highlightMesh = null;
   }
   if (sphereMesh && displayedSegments && selectedSpans.length) {
-    const guides = collectProjectedSegments(selectedSpans, sphereMesh.geometry, {
+    const guides = collectProjectedSegments(selectedSpans, patternBase, {
       radius: 1,
       samplesPerSegment: params.projectionSamples,
     });
@@ -911,20 +925,39 @@ if (Object.keys(SURFACES).length > 1) {
     },
   });
 }
+const surfaceControls = {};
 const surfaceGroups = Object.fromEntries(
   Object.entries(SURFACES).map(([id, surface]) => {
     const container = document.createElement('div');
     container.className = 'control-stack';
     surfaceSection.el.append(container);
     const group = surfaceSection.group(container);
-    surface.controls.forEach(({ type, key, ...spec }) => {
-      group[type](surfaceSettings[id], key, { ...spec, onChange: rebuildSphere });
+    surfaceControls[id] = {};
+    surface.controls.forEach(({ type, key, when, ...spec }) => {
+      const control = group[type](surfaceSettings[id], key, {
+        ...spec,
+        onChange: () => {
+          showSurfaceControls();
+          rebuildSphere();
+        },
+      });
+      control.when = when;
+      surfaceControls[id][key] = control;
     });
     return [id, group];
   }),
 );
+// Mirror symmetry only lines up on unsubdivided faces, so it holds frequency at 1.
+const updateFrequencyLock = () => {
+  const frequency = surfaceControls.geodesic?.frequency;
+  const locked = templateEditor?.getPattern().symmetry === 'mirror';
+  [2, 3, 4, 5, 6].forEach((n) => frequency?.setDisabled(n, locked));
+};
 const showSurfaceControls = () => {
   Object.entries(surfaceGroups).forEach(([id, group]) => group.show(id === params.surface));
+  Object.entries(surfaceControls).forEach(([id, controls]) => {
+    Object.values(controls).forEach((control) => control.show(control.when?.(surfaceSettings[id]) ?? true));
+  });
 };
 showSurfaceControls();
 const surfaceSummary = surfaceSection.note();
@@ -1539,12 +1572,76 @@ const collapsedPanels = readCollapsedPanels();
 setPanelCollapsed('left', Boolean(collapsedPanels.left));
 setPanelCollapsed('right', Boolean(collapsedPanels.right));
 
+// Dragging the pattern panel's left edge widens it (double-click resets).
+const PATTERN_WIDTH_KEY = 'sphere-ui-pattern-width';
+const patternPanel = document.querySelector('#pattern-panel');
+const setPatternWidth = (px) => {
+  if (px === null) {
+    document.documentElement.style.removeProperty('--pattern-width');
+    return;
+  }
+  const max = Math.max(300, window.innerWidth * 0.7);
+  document.documentElement.style.setProperty('--pattern-width', `${Math.round(Math.min(max, Math.max(280, px)))}px`);
+};
+const savePatternWidth = (px) => {
+  try {
+    if (px === null) {
+      localStorage.removeItem(PATTERN_WIDTH_KEY);
+    } else {
+      localStorage.setItem(PATTERN_WIDTH_KEY, String(px));
+    }
+  } catch {
+    // Remembering the panel width is best-effort.
+  }
+};
+try {
+  const stored = Number(localStorage.getItem(PATTERN_WIDTH_KEY));
+  if (stored > 0) {
+    setPatternWidth(stored);
+  }
+} catch {
+  // Ignore unreadable storage.
+}
+const patternResizer = document.createElement('div');
+patternResizer.className = 'panel-resizer';
+patternResizer.title = 'Drag to resize · double-click to reset';
+patternPanel.append(patternResizer);
+let patternResize = null;
+patternResizer.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) {
+    return;
+  }
+  patternResize = { x: event.clientX, width: patternPanel.offsetWidth };
+  patternResizer.setPointerCapture(event.pointerId);
+  document.body.classList.add('resizing');
+});
+patternResizer.addEventListener('pointermove', (event) => {
+  if (patternResize) {
+    setPatternWidth(patternResize.width + patternResize.x - event.clientX);
+  }
+});
+const endPatternResize = () => {
+  if (!patternResize) {
+    return;
+  }
+  patternResize = null;
+  document.body.classList.remove('resizing');
+  savePatternWidth(patternPanel.offsetWidth);
+};
+patternResizer.addEventListener('pointerup', endPatternResize);
+patternResizer.addEventListener('pointercancel', endPatternResize);
+patternResizer.addEventListener('dblclick', () => {
+  setPatternWidth(null);
+  savePatternWidth(null);
+});
+
 // ---------------------------------------------------------------------------
 // Pattern editor and gallery
 
 templateEditor = new TemplateEditor(document.querySelector('#template-root'), {
   onChange: ({ connections }) => {
     patternState.connections = connections;
+    updateFrequencyLock();
     if (!batching) {
       rebuildPatternOverlay();
     }
@@ -1554,6 +1651,12 @@ templateEditor = new TemplateEditor(document.querySelector('#template-root'), {
     updateHighlight();
   },
 });
+templateEditor.setFaceLayout(getSurface(params.surface).faceLayout?.(currentSurfaceParams()) ?? null);
+updateFrequencyLock();
+if (templateEditor.activeVariant !== undefined) {
+  patternState.connections = templateEditor.getConnections();
+  rebuildPatternOverlay();
+}
 
 const currentDesign = () => ({
   pattern: templateEditor.getPattern(),

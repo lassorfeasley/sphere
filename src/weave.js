@@ -1,6 +1,6 @@
 import { Vector3 } from 'three';
 import { barycentricToVector, readVertex } from './geometryUtils.js';
-import { splitAtJunctions } from './templateSpace.js';
+import { onVariant, splitAtJunctions } from './templateSpace.js';
 
 const v0 = new Vector3();
 const v1 = new Vector3();
@@ -282,11 +282,17 @@ function buildGraph(pieces, geometry) {
     return id;
   };
 
+  const variants = geometry.userData.faceVariant;
   for (let i = 0; i < index.length; i += 3) {
     readVertex(index[i], v0, positions);
     readVertex(index[i + 1], v1, positions);
     readVertex(index[i + 2], v2, positions);
-    pieces.forEach(({ start, end }) => {
+    const variant = variants?.[i / 3];
+    pieces.forEach((piece) => {
+      if (!onVariant(piece, variant)) {
+        return;
+      }
+      const { start, end } = piece;
       const a = nodeFor(start);
       const b = nodeFor(end);
       const key = a < b ? `${a}_${b}` : `${b}_${a}`;

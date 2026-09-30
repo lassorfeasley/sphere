@@ -1,5 +1,6 @@
 import { BufferGeometry, Float32BufferAttribute, Vector3 } from 'three';
 import { barycentricToVector, normalizeBarycentric, readVertex } from './geometryUtils.js';
+import { onVariant } from './templateSpace.js';
 
 const v0 = new Vector3();
 const v1 = new Vector3();
@@ -56,6 +57,7 @@ export function collectProjectedSegments(connections, geometry, options = {}) {
   const sampledConnections = connections.map((connection) =>
     sampleBarycentricSegment(connection.start, connection.end, samplesPerSegment),
   );
+  const variants = geometry.userData.faceVariant;
 
   const quantize = (value) => Math.round((value / radius) * 1e5);
   const pointKey = (p) => `${quantize(p.x)},${quantize(p.y)},${quantize(p.z)}`;
@@ -65,7 +67,11 @@ export function collectProjectedSegments(connections, geometry, options = {}) {
     readVertex(indexArray[i + 1], v1, positionsArray);
     readVertex(indexArray[i + 2], v2, positionsArray);
 
-    sampledConnections.forEach((samples) => {
+    const variant = variants?.[i / 3];
+    sampledConnections.forEach((samples, c) => {
+      if (!onVariant(connections[c], variant)) {
+        return;
+      }
       for (let s = 0; s < samples.length - 1; s += 1) {
         barycentricToVector(samples[s], v0, v1, v2, flatPointA);
         barycentricToVector(samples[s + 1], v0, v1, v2, flatPointB);
@@ -223,19 +229,43 @@ export function buildProjectedFaceGeometry(geometry, { radius = 1, subdivisions 
   return faceGeometry;
 }
 
-/** Geodesic face edges drawn as arcs on the sphere, each shared edge once. */
+/**
+ * Geodesic face edges drawn as arcs on the sphere, each shared edge once.
+ * Edges between coplanar triangles (inside a polygon face) are skipped.
+ */
 export function buildProjectedEdgeGeometry(geometry, { radius = 1, samples = 12, lift = 1.002 } = {}) {
   const positionsArray = geometry.getAttribute('position').array;
   const indexArray = geometry.getIndex().array;
   const seen = new Set();
   const linePositions = [];
 
+  const normals = [];
+  const firstFace = new Map();
+  const interior = new Set();
+  for (let i = 0; i < indexArray.length; i += 3) {
+    readVertex(indexArray[i], v0, positionsArray);
+    readVertex(indexArray[i + 1], v1, positionsArray);
+    readVertex(indexArray[i + 2], v2, positionsArray);
+    const normal = v1.clone().sub(v0).cross(v2.clone().sub(v0)).normalize();
+    normals.push(normal);
+    for (let e = 0; e < 3; e += 1) {
+      const ia = indexArray[i + e];
+      const ib = indexArray[i + ((e + 1) % 3)];
+      const key = ia < ib ? `${ia}_${ib}` : `${ib}_${ia}`;
+      if (!firstFace.has(key)) {
+        firstFace.set(key, i / 3);
+      } else if (normals[firstFace.get(key)].dot(normal) > 1 - 1e-6) {
+        interior.add(key);
+      }
+    }
+  }
+
   for (let i = 0; i < indexArray.length; i += 3) {
     for (let e = 0; e < 3; e += 1) {
       const ia = indexArray[i + e];
       const ib = indexArray[i + ((e + 1) % 3)];
       const key = ia < ib ? `${ia}_${ib}` : `${ib}_${ia}`;
-      if (seen.has(key)) {
+      if (seen.has(key) || interior.has(key)) {
         continue;
       }
       seen.add(key);

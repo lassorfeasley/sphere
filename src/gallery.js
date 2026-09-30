@@ -10,7 +10,7 @@ import {
   SphereGeometry,
   WebGLRenderer,
 } from 'three';
-import { PRESETS, expandStrokes, flattenSegments } from './templateSpace.js';
+import { PRESETS, patternConnections } from './templateSpace.js';
 import { getSurface } from './surfaces.js';
 import { buildWovenSegments } from './weave.js';
 import { buildTubeGroup, disposeTubeGroup } from './tubes.js';
@@ -30,14 +30,19 @@ const THUMB_BACKGROUND = '#0d0f14';
 export const DEFAULT_SURFACE_COLOR = '#8ae5ff';
 export const PATTERN_COLOR = '#fef4b4';
 
-const starter = (id, name, presetKey, base, frequency = 1) => {
+const starter = (id, name, presetKey, base, frequency = 1, { pentagons = true } = {}) => {
   const preset = PRESETS[presetKey];
   return {
     id,
     name,
     starter: true,
-    pattern: { symmetry: 'kaleidoscope', grid: preset.grid, strokes: preset.strokes },
-    surface: { type: 'geodesic', base, frequency },
+    pattern: {
+      symmetry: preset.symmetry ?? 'kaleidoscope',
+      grid: preset.grid,
+      strokes: preset.strokes,
+      sideStrokes: preset.sideStrokes ?? null,
+    },
+    surface: { type: 'geodesic', base, frequency, pentagons },
   };
 };
 
@@ -48,6 +53,9 @@ const starter = (id, name, presetKey, base, frequency = 1) => {
 export const STARTERS = [
   starter('line-sphere', 'Line Sphere', 'lineSphere', 'icosahedron'),
   starter('soccer', 'Soccer Ball', 'honeycomb', 'pentakis dodecahedron'),
+  starter('star-ball', 'Star Ball', 'stars', 'truncated icosahedron'),
+  starter('linked-rings', 'Linked Rings', 'linkedRings', 'truncated icosahedron'),
+  starter('tri-stars', 'Tri-Stars', 'triStars', 'truncated icosahedron', 1, { pentagons: false }),
   starter('honeycomb', 'Honeycomb', 'honeycomb', 'icosahedron', 2),
   starter('squares-hexes', 'Squares & Hexagons', 'honeycomb', 'tetrakis hexahedron'),
   starter('trihex', 'Tri-Hex', 'trihex', 'icosahedron'),
@@ -84,8 +92,11 @@ class ThumbnailRenderer {
     const radius = 1;
     const print = { ...DEFAULT_PRINT, ...migratePrint(design.print) };
     const surface = getSurface(design.surface?.type);
-    const geometry = surface.createGeometry({ ...surface.defaults, ...design.surface }, radius);
-    const connections = flattenSegments(expandStrokes(design.pattern.strokes, design.pattern.symmetry));
+    const settings = { ...surface.defaults, ...design.surface };
+    const geometry = surface.createGeometry(settings, radius);
+    const stamped = surface.patternGeometry?.(geometry, settings) ?? geometry;
+    const split = Boolean(surface.faceLayout?.(settings)?.split) && design.pattern.symmetry === 'mirror';
+    const connections = patternConnections(design.pattern, split);
     const group = new Group();
     this.surfaceMaterial.color.set(design.appearance?.color ?? DEFAULT_SURFACE_COLOR);
     this.ball.scale.setScalar(radius);
@@ -93,7 +104,7 @@ class ThumbnailRenderer {
 
     let tubes = null;
     const result = connections.length
-      ? buildWovenSegments(connections, geometry, weaveOptions(print, { radius, samples: 10 }))
+      ? buildWovenSegments(connections, stamped, weaveOptions(print, { radius, samples: 10 }))
       : null;
     if (result?.segments) {
       const scale = sceneScale(print, radius);
@@ -103,6 +114,7 @@ class ThumbnailRenderer {
       this.ball.scale.setScalar(radius - surfaceInset(result.segments, profile, radius));
     }
     geometry.dispose();
+    stamped.dispose();
 
     this.scene.add(group);
     this.renderer.render(this.scene, this.camera);
