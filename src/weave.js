@@ -1475,7 +1475,7 @@ function tautEase(u, bendShare) {
   return (u - a / 2) / (1 - a);
 }
 
-// At full tension a strand bends only within this share of each end of a
+// Fully taut, a strand bends only within this share of each end of a
 // span between crossings; slack (0) spreads the bend over the whole span.
 const TAUT_BEND_SHARE = 0.06;
 const TAUT_BEND_SAMPLES = 6;
@@ -1486,7 +1486,7 @@ const ROUNDING_PEER_SHARE = 0.5;
 /**
  * With `taut` (0 to 1) set, give every span between knots the share of its
  * length each end bends over (see `tautEase`): half the span when slack,
- * shrinking as tension rises, but never so small that the bend (peak
+ * shrinking as tautness rises, but never so small that the bend (peak
  * curvature Δh / (a (1 - a) L²)) is tighter than `minBend`.
  */
 function tautenSpans(knots, taut, amplitude, minBend, radius) {

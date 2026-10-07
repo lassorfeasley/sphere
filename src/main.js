@@ -50,7 +50,7 @@ import {
   effectiveBlendMm,
   gapMode,
   migratePrint,
-  pressSwell,
+  pressShape,
   sceneScale,
   strutProfile,
   strutWidthMm,
@@ -699,9 +699,17 @@ const rebuildProjectedOverlay = () => {
       smoothSphere.scale.setScalar(shrink);
       smoothSphereEdges.scale.setScalar(shrink);
       const colored = params.colorPieces && result.pieces > 1;
+      const shape = pressShape(printParams);
+      const press = {
+        strandIds: result.strandIds,
+        junctions: result.junctions,
+        swell: shape.swell,
+        rounding: shape.rounding,
+        spread: shape.spreadMm * scale,
+      };
       projectedLines = colored
-        ? buildTubeGroup(segments, profile, pieceMaterial, Array.from(result.pieceIds, pieceColor), result.ups)
-        : buildTubeGroup(segments, profile, tubeMaterial, null, result.ups);
+        ? buildTubeGroup(segments, profile, pieceMaterial, Array.from(result.pieceIds, pieceColor), result.ups, press)
+        : buildTubeGroup(segments, profile, tubeMaterial, null, result.ups, press);
       sphereGroup.add(projectedLines);
     }
   } else {
@@ -747,6 +755,7 @@ const updateHighlight = () => {
 const solidArgs = (result, edgeLength) => {
   const sphereRadius = printParams.diameterMm / 2;
   const segments = Float32Array.from(result.segments, (v) => (v * sphereRadius) / RADIUS);
+  const press = pressShape(printParams);
   return {
     segments,
     sphereRadius,
@@ -755,7 +764,9 @@ const solidArgs = (result, edgeLength) => {
     ups: result.ups,
     blendRadius: effectiveBlendMm(printParams),
     crossingBlendRadius: crossingBlendMm(printParams),
-    pressSwell: pressSwell(printParams),
+    pressSwell: press.swell,
+    pressRounding: press.rounding,
+    pressSpread: press.spreadMm,
     junctions: Float32Array.from(result.junctions, (v) => (v * sphereRadius) / RADIUS),
     edgeLength,
   };
@@ -977,7 +988,8 @@ surfaceSection.slider(printParams, 'diameterMm', {
 const updateProfileControls = () => {
   runControl.show(printParams.weave);
   touchControl.show(printParams.weave);
-  tensionControl.show(printParams.weave && printParams.strandsTouch);
+  straightnessControl.show(printParams.weave && printParams.strandsTouch);
+  softnessControl.show(printParams.weave && printParams.strandsTouch);
   crossingFilletControl.show(!printParams.weave);
   gapControl.show(printParams.weave && !printParams.strandsTouch);
 };
@@ -1096,12 +1108,20 @@ const touchControl = weaveSection.toggle(printParams, 'strandsTouch', {
     rebuildPatternOverlay();
   },
 });
-const tensionControl = weaveSection.slider(printParams, 'tension', {
-  label: 'Tension',
+const straightnessControl = weaveSection.slider(printParams, 'straightness', {
+  label: 'Straightness',
   min: 0,
   max: 1,
   step: 0.05,
-  hint: 'Higher pulls strands straighter and presses them tighter at crossings.',
+  hint: 'Higher pulls strands straight between crossings, bending tightly over each one.',
+  onChange: rebuildPatternOverlay,
+});
+const softnessControl = weaveSection.slider(printParams, 'softness', {
+  label: 'Softness',
+  min: 0,
+  max: 1,
+  step: 0.05,
+  hint: 'Higher lets crossing strands sink into each other and bulge, like soft tubes.',
   onChange: rebuildPatternOverlay,
 });
 const crossingFilletControl = weaveSection.slider(printParams, 'crossingSmoothing', {

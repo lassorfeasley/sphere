@@ -9,7 +9,8 @@ export const DEFAULT_PRINT = {
   heightMm: 2.5,
   roundness: 1,
   weave: true,
-  tension: 0.5,
+  straightness: 0.5,
+  softness: 0.5,
   weaveRun: 1,
   strandsTouch: true,
   crossingGapMm: 1,
@@ -39,7 +40,7 @@ export const DEFAULT_PRINT = {
 const MIN_BEND_RADII = 3;
 const TAUT_MIN_BEND_RADII = 1;
 const minBendRadii = (p) =>
-  MIN_BEND_RADII + (TAUT_MIN_BEND_RADII - MIN_BEND_RADII) * (p.strandsTouch ? p.tension : 0);
+  MIN_BEND_RADII + (TAUT_MIN_BEND_RADII - MIN_BEND_RADII) * (p.strandsTouch ? p.straightness : 0);
 
 /** Scene units per millimeter for a surface of the given scene radius. */
 export const sceneScale = (p, radius) => radius / (p.diameterMm / 2);
@@ -65,6 +66,12 @@ export const migratePrint = (saved) => {
   if (print.crossingSmoothing === undefined && print.jointSmoothing !== undefined) {
     print = { ...print, crossingSmoothing: print.jointSmoothing };
   }
+  // Tension both pulled strands straight and pressed them together; each
+  // now has its own setting.
+  if (print.tension !== undefined) {
+    const { tension, ...rest } = print;
+    print = { straightness: tension, softness: tension, ...rest };
+  }
   const anchor = print.loopAnchor;
   if (anchor !== undefined && !(Array.isArray(anchor) && anchor.length === 3 && anchor.every(Number.isFinite) && anchor.some(Boolean))) {
     const { loopAnchor, ...rest } = print;
@@ -76,21 +83,28 @@ export const migratePrint = (saved) => {
 export const weaving = (p) => p.weave;
 export const gapMode = (p) => weaving(p) && !p.strandsTouch;
 
-// Tension 0 leaves crossing strands just touching (centerlines one diameter
-// apart); tension 1 presses them 40% into each other, keeping enough weave
-// to show the taut runs between crossings. Returns each strand's rise or dip
-// as a fraction of the strut diameter.
+// Softness 0 leaves crossing strands just touching like hard rods
+// (centerlines one diameter apart); softness 1 sinks them 40% into each
+// other, keeping enough weave to read as over and under. Returns each
+// strand's rise or dip as a fraction of the strut diameter.
 // With Strands Touch off, centerlines separate by one diameter plus the gap.
 const weaveFraction = (p) =>
-  p.strandsTouch ? 0.5 - 0.2 * p.tension : 0.5 + p.crossingGapMm / (2 * p.heightMm);
+  p.strandsTouch ? 0.5 - 0.2 * p.softness : 0.5 + p.crossingGapMm / (2 * p.heightMm);
 
-// Pressed strands swell beside the crossing by this fraction of how deep they
-// overlap, so they read as soft tubes squeezed together rather than solids
-// passing through each other; more so the tauter they are. Unwoven strands
-// share one level and would swell at every crossing, so only the weave presses.
-const PRESS_SWELL = [0.3, 0.8];
-export const pressSwell = (p) =>
-  weaving(p) && p.strandsTouch ? PRESS_SWELL[0] + (PRESS_SWELL[1] - PRESS_SWELL[0]) * p.tension : 0;
+// How pressed strands give, from firm (softness 0) to soft (1), so they read
+// as elastic tubes squeezed together rather than solids passing through
+// each other: the share of the overlap they bulge sideways by, the rounding
+// of the groove they meet in (strut half-heights), and how far along the
+// strand the squeeze eases out (strut heights). Unwoven strands share one
+// level and would swell at every crossing, so only the weave presses.
+const PRESS = { swell: [0.3, 0.9], rounding: [0.25, 1], spread: [0, 1.5] };
+export const pressShape = (p) => {
+  if (!(weaving(p) && p.strandsTouch)) {
+    return { swell: 0, rounding: 0, spreadMm: 0 };
+  }
+  const at = ([firm, soft]) => firm + (soft - firm) * p.softness;
+  return { swell: at(PRESS.swell), rounding: at(PRESS.rounding), spreadMm: at(PRESS.spread) * p.heightMm };
+};
 
 // Smoothing 1 gives a fillet of 1.5 strut radii where strands meet,
 // measured on the strut's thinner side.
@@ -135,7 +149,7 @@ export const weaveOptions = (p, { radius, samples }) => {
     crossingsTouch: !weaving(p) || p.strandsTouch,
     run: p.weaveRun,
     // Only touching strands pull taut; a kept gap stays a soft wave.
-    taut: weaving(p) && p.strandsTouch ? p.tension : 0,
+    taut: weaving(p) && p.strandsTouch ? p.straightness : 0,
     minSeparation: gapMode(p) ? (p.heightMm + p.crossingGapMm) * scale : 0,
   };
 };

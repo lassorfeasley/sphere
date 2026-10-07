@@ -1,4 +1,5 @@
 import Module from 'manifold-3d';
+import { junctionWeight, pressAtEnds as findPresses } from './press.js';
 
 let manifoldPromise = null;
 
@@ -10,6 +11,77 @@ function getManifoldModule() {
     });
   }
   return manifoldPromise;
+}
+
+// Far below any printer's resolution, but well above float32 rounding at
+// sphere sizes, so STL readers can't weld the vertices back together.
+const TOUCH_SEPARATION_MM = 0.01;
+
+/**
+ * Where two parts of the level-set surface just touch, the mesh keeps
+ * separate vertices at one position. That's manifold as an indexed mesh, but
+ * STL matches corners by position, so print services see edges shared by
+ * four triangles and reject the file. Move each such vertex `distance` into
+ * its own side of the surface (against its normal), opening the contact.
+ */
+function separateTouchingVertices(vertProperties, triVerts, numProp, distance) {
+  const vertexCount = vertProperties.length / numProp;
+  const firstAt = new Map();
+  const touching = new Uint8Array(vertexCount);
+  let any = false;
+  for (let v = 0; v < vertexCount; v += 1) {
+    const o = v * numProp;
+    const key = `${vertProperties[o]},${vertProperties[o + 1]},${vertProperties[o + 2]}`;
+    const first = firstAt.get(key);
+    if (first === undefined) {
+      firstAt.set(key, v);
+    } else {
+      touching[first] = 1;
+      touching[v] = 1;
+      any = true;
+    }
+  }
+  if (!any) {
+    return;
+  }
+  // Area-weighted normals, only for the touching vertices.
+  const normals = new Map();
+  for (let t = 0; t < triVerts.length; t += 3) {
+    const a = triVerts[t];
+    const b = triVerts[t + 1];
+    const c = triVerts[t + 2];
+    if (!(touching[a] || touching[b] || touching[c])) {
+      continue;
+    }
+    const ax = vertProperties[a * numProp];
+    const ay = vertProperties[a * numProp + 1];
+    const az = vertProperties[a * numProp + 2];
+    const ux = vertProperties[b * numProp] - ax;
+    const uy = vertProperties[b * numProp + 1] - ay;
+    const uz = vertProperties[b * numProp + 2] - az;
+    const wx = vertProperties[c * numProp] - ax;
+    const wy = vertProperties[c * numProp + 1] - ay;
+    const wz = vertProperties[c * numProp + 2] - az;
+    const n = [uy * wz - uz * wy, uz * wx - ux * wz, ux * wy - uy * wx];
+    [a, b, c].forEach((v) => {
+      if (touching[v]) {
+        const sum = normals.get(v) ?? [0, 0, 0];
+        sum[0] += n[0];
+        sum[1] += n[1];
+        sum[2] += n[2];
+        normals.set(v, sum);
+      }
+    });
+  }
+  normals.forEach(([nx, ny, nz], v) => {
+    const length = Math.hypot(nx, ny, nz);
+    if (length > 0) {
+      const o = v * numProp;
+      vertProperties[o] -= (nx / length) * distance;
+      vertProperties[o + 1] -= (ny / length) * distance;
+      vertProperties[o + 2] -= (nz / length) * distance;
+    }
+  });
 }
 
 /**
@@ -42,6 +114,10 @@ function getManifoldModule() {
  *   each flattens against the other, meeting it in a rounded groove, and
  *   bulges sideways by up to this fraction of the overlap depth, like soft
  *   tubes pressed together. 0 lets them simply intersect.
+ * @param pressRounding Rounding of the rim of each pressed flat, as a share of
+ *   `halfHeight`: small meets in a crisp crease, large in a wide soft groove.
+ * @param pressSpread How far along each strand the bulge eases out from
+ *   where it presses (mm); 0 keeps it to the press itself.
  * @param junctions Optional flat [x,y,z,...] of points where lines meet (mm).
  * @param edgeLength Approximate output triangle edge length (mm); smaller = finer.
  */
@@ -54,6 +130,8 @@ export async function buildStrutSolid({
   blendRadius = 0,
   crossingBlendRadius = blendRadius,
   pressSwell = 0,
+  pressRounding = 0.6,
+  pressSpread = 0,
   junctions = null,
   edgeLength,
 }) {
@@ -235,96 +313,29 @@ export async function buildStrutSolid({
   };
 
   // The joint fillet applies within `jointReach` of a junction and eases
-  // into the crossing fillet over the next `easeLength`. Junctions are
-  // hashed into every cell their reach touches, like the segments.
+  // into the crossing fillet over the next `easeLength`.
   const jointReach = 2 * halfExtent + maxBlend;
   const easeLength = 2 * halfExtent;
-  const junctionCell = jointReach + easeLength;
-  const junctionGrid = new Map();
   const varyingBlend = blend && crossingBlendRadius !== blendRadius && junctions?.length > 0;
   const hashJunctions = blend && junctions?.length > 0 && (varyingBlend || maxSwell > 0);
-  for (let j = 0; hashJunctions && j < junctions.length; j += 3) {
-    const lo = [0, 1, 2].map((k) => Math.floor((junctions[j + k] - junctionCell) / junctionCell));
-    const hi = [0, 1, 2].map((k) => Math.floor((junctions[j + k] + junctionCell) / junctionCell));
-    for (let ix = lo[0]; ix <= hi[0]; ix += 1) {
-      for (let iy = lo[1]; iy <= hi[1]; iy += 1) {
-        for (let iz = lo[2]; iz <= hi[2]; iz += 1) {
-          const key = cellKey(ix, iy, iz);
-          let bucket = junctionGrid.get(key);
-          if (!bucket) {
-            bucket = [];
-            junctionGrid.set(key, bucket);
-          }
-          bucket.push(j);
-        }
-      }
-    }
-  }
   // 0 within `jointReach` of a junction, easing up to 1 at crossings.
-  const crossingWeight = (x, y, z) => {
-    if (!hashJunctions) {
-      return 1;
-    }
-    const bucket = junctionGrid.get(cellKey(
-      Math.floor(x / junctionCell),
-      Math.floor(y / junctionCell),
-      Math.floor(z / junctionCell),
-    ));
-    let nearest = Infinity;
-    for (let i = 0; bucket && i < bucket.length; i += 1) {
-      const j = bucket[i];
-      nearest = Math.min(nearest, Math.hypot(x - junctions[j], y - junctions[j + 1], z - junctions[j + 2]));
-    }
-    const t = Math.min(Math.max((nearest - jointReach) / easeLength, 0), 1);
-    return t * t * (3 - 2 * t);
-  };
+  const crossingWeight = (hashJunctions && junctionWeight(junctions, jointReach, easeLength)) || (() => 1);
   const blendAt = (x, y, z, weight) =>
     varyingBlend ? blendRadius + (crossingBlendRadius - blendRadius) * weight : crossingBlendRadius;
-
-  const nearestCenter = [0, 0, 0];
-  const nearestOnSegment = (px, py, pz, s, out) => {
-    const o = s * 6;
-    const dx = segments[o + 3] - segments[o];
-    const dy = segments[o + 4] - segments[o + 1];
-    const dz = segments[o + 5] - segments[o + 2];
-    const lengthSq = dx * dx + dy * dy + dz * dz;
-    const t = lengthSq > 0
-      ? Math.min(Math.max(((px - segments[o]) * dx + (py - segments[o + 1]) * dy + (pz - segments[o + 2]) * dz) / lengthSq, 0), 1)
-      : 0;
-    out[0] = segments[o] + dx * t;
-    out[1] = segments[o + 1] + dy * t;
-    out[2] = segments[o + 2] + dz * t;
-  };
 
   // How deep each segment's ends press into other strands, and which way
   // (unit vector toward the nearest one): struts stacked closer than their
   // combined height overlap by the difference. Stored per segment end
   // [depth, dx, dy, dz] and interpolated along it, so the press varies
   // smoothly along the strand whichever strut happens to be nearest.
-  const pressAtEnds = new Float64Array(maxSwell > 0 ? segmentCount * 8 : 0);
-  for (let s = 0; blend && maxSwell > 0 && s < segmentCount; s += 1) {
-    for (let end = 0; end < 2; end += 1) {
-      const px = segments[s * 6 + end * 3];
-      const py = segments[s * 6 + end * 3 + 1];
-      const pz = segments[s * 6 + end * 3 + 2];
-      const bucket = grid.get(cellKey(cellIndex(px), cellIndex(py), cellIndex(pz))) ?? [];
-      let nearest = 2 * halfHeight;
-      for (let i = 0; i < bucket.length; i += 1) {
-        if (!sameStretch(s, bucket[i])) {
-          nearestOnSegment(px, py, pz, bucket[i], nearestCenter);
-          const distance = Math.hypot(nearestCenter[0] - px, nearestCenter[1] - py, nearestCenter[2] - pz);
-          if (distance < nearest && distance > 1e-9) {
-            nearest = distance;
-            const o = s * 8 + end * 4;
-            pressAtEnds[o + 1] = (nearestCenter[0] - px) / distance;
-            pressAtEnds[o + 2] = (nearestCenter[1] - py) / distance;
-            pressAtEnds[o + 3] = (nearestCenter[2] - pz) / distance;
-          }
-        }
-      }
-      pressAtEnds[s * 8 + end * 4] = 2 * halfHeight - nearest;
-    }
-  }
+  const pressAtEnds = blend && maxSwell > 0
+    ? findPresses(segments, strandIds, {
+      contact: 2 * halfHeight,
+      apart: stretchReach,
+      spread: pressSpread,
+      weight: hashJunctions ? crossingWeight : null,
+    })
+    : new Float64Array(0);
 
   // How far strut `s` bulges at a point. The displaced material goes
   // sideways: nothing toward or away from the strut it presses on.
@@ -365,7 +376,7 @@ export async function buildStrutSolid({
   // between them, and the rim of that flat gets this rounding, so the two
   // meet in a narrow groove like pillows instead of cutting into each other.
   // Each flat reaches a little past the midway plane so the two stay fused.
-  const pressRound = maxSwell > 0 ? 0.6 * halfHeight : 0;
+  const pressRound = maxSwell > 0 ? pressRounding * halfHeight : 0;
   const pressFuse = 0.4 * pressRound;
   const roundedMax = (p, q, r) => {
     if (!(r > 0)) {
@@ -414,7 +425,9 @@ export async function buildStrutSolid({
       }
     }
     if (d2 - d1 >= pairReach) {
-      return d1;
+      // A bulge spread along the strand can reach past any other strand.
+      const swell = maxSwell > 0 && pressSpread > 0 ? pressSwellAt(x, y, z, s1) : 0;
+      return swell > 0 ? d1 - crossingWeight(x, y, z) * swell : d1;
     }
     const weight = crossingWeight(x, y, z);
     let a = d1;
@@ -467,6 +480,7 @@ export async function buildStrutSolid({
 
   const manifold = Manifold.levelSet(sdf, bounds, edgeLength);
   const mesh = manifold.getMesh();
+  separateTouchingVertices(mesh.vertProperties, mesh.triVerts, mesh.numProp, TOUCH_SEPARATION_MM);
   const result = {
     numProp: mesh.numProp,
     vertProperties: mesh.vertProperties,

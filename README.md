@@ -81,17 +81,21 @@ where lines meet without passing straight through. Crossing strands press into e
 flattening where they meet and bulging sideways like soft hoses, so the print
 stays in one piece. Where crossings are close together the weave gets
 shallower, so no strand bends tighter than the minimum bend (three strut
-radii when slack, down to one at full tension).
+radii when slack, down to one at full straightness).
 
 *Over / under run* sets the weave rhythm: 1 is a plain weave (over one, under
 one), 2 a twill (over two, under two), and so on. With *Strands touch* on,
-*Tension* (0–1) makes the strands behave like stretched elastic. At 0 they
-just touch and ease over each other in a soft wave. Raising it pulls them
-taut: they run straight between crossings and do their bending right at
-each crossing, wrapping tightly over the strand beneath or dipping sharply
-under the one above. They also press harder together, up to 40% overlap,
-and bulge more where they press. This is real geometry through the whole
-strut, not a surface effect. Turn *Strands touch* off to set a *Minimum gap* between
+two sliders (0–1) shape the weave. *Straightness* sets the strands' path:
+at 0 they ease over each other in a soft wave; raising it pulls them taut,
+so they run straight between crossings and do their bending right at each
+crossing, wrapping tightly over the strand beneath or dipping sharply under
+the one above. *Softness* sets how they give where they cross, so they read
+as elastic tubes pressing into each other rather than rods passing through
+each other. At 0 they just touch like hard rods. Raising it sinks them
+deeper into each other (up to 40% overlap), widens and rounds the groove
+they meet in, bulges them more to the sides, and spreads that squeeze
+further along each strand. This is real geometry through the whole strut,
+not a surface effect, and the preview shows it too. Turn *Strands touch* off to set a *Minimum gap* between
 crossing strands instead. Crossings much closer together than that spacing (tight knots) are
 stacked as one cluster, each strand holding its own level through it, so
 the gap holds even in dense knots of crossings (at the cost of strands

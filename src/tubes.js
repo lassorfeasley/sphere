@@ -8,6 +8,7 @@ import {
   Quaternion,
   Vector3,
 } from 'three';
+import { junctionWeight, pressAtEnds } from './press.js';
 
 const Z = new Vector3(0, 0, 1);
 // Points per quarter of the rounded outline; a full circle gets 16 sides.
@@ -62,6 +63,15 @@ export function outline({ halfWidth, halfHeight, corner }, quarters = [0, 1, 2, 
     }
   });
   return points;
+}
+
+/** The smaller of `a` and `b`, rounded off over `k` where they're close. */
+function smoothMin(a, b, k) {
+  if (!(k > 0)) {
+    return Math.min(a, b);
+  }
+  const h = Math.max(k - Math.abs(a - b), 0) / k;
+  return Math.min(a, b) - (h * h * k) / 4;
 }
 
 /** Index a grid of quads, wound so faces point along the vertex normals. */
@@ -176,7 +186,7 @@ function traceChains(segments, colors) {
  * zero. Neighboring segments share rings, so the shading runs smoothly
  * along the whole chain.
  */
-function sweptGeometry(chains, profile, withColors, ups) {
+function sweptGeometry(chains, profile, withColors, ups, press) {
   const ring = outline(profile);
   const size = ring.length;
   const positions = [];
@@ -190,7 +200,16 @@ function sweptGeometry(chains, profile, withColors, ups) {
   const normal = new Vector3();
   const prev = new Vector3();
   const next = new Vector3();
+  const bulgeDir = new Vector3();
+  const flatDir = new Vector3();
   let base = 0;
+
+  // A press direction (per end, see `pressAtEnds`) laid into the ring's plane.
+  const inRing = (out, ends, e) => {
+    out.fromArray(ends, e * 4 + 1);
+    out.addScaledVector(tangent, -out.dot(tangent));
+    return out.lengthSq() > 1e-12 ? out.normalize() : null;
+  };
 
   const hint = new Vector3();
   const addUp = (span) => {
@@ -249,10 +268,37 @@ function sweptGeometry(chains, profile, withColors, ups) {
         }
       }
 
+      // Mirror the solid's pressing: bulge sideways by the (spread) press
+      // depth, and flatten against the plane midway to the strand pressed on.
+      let bulge = 0;
+      let midway = Infinity;
+      if (press) {
+        const e = k < spans.length ? spans[k] * 2 : spans[k - 1] * 2 + 1;
+        const depth = press.spread[e * 4];
+        if (depth > 0 && inRing(bulgeDir, press.spread, e)) {
+          bulge = (press.swell * depth * depth) / (depth + 0.5 * profile.halfHeight);
+        }
+        const contactDepth = press.contact[e * 4];
+        if (contactDepth > 0 && inRing(flatDir, press.contact, e)) {
+          midway = (2 * profile.halfHeight - contactDepth) / 2 + press.fuse;
+        }
+      }
+
       ring.forEach(({ x, z, nx, nz }) => {
         offset.copy(lateral).multiplyScalar(x).addScaledVector(up, z);
         if (stretch) {
           offset.addScaledVector(bend, offset.dot(bend) * stretch);
+        }
+        if (bulge > 0) {
+          const length = offset.length();
+          if (length > 1e-12) {
+            const along = offset.dot(bulgeDir) / length;
+            offset.multiplyScalar(1 + (bulge * (1 - along * along)) / length);
+          }
+        }
+        if (midway < Infinity) {
+          const reach = offset.dot(flatDir);
+          offset.addScaledVector(flatDir, smoothMin(reach, midway, press.round) - reach);
         }
         positions.push(p.x + offset.x, p.y + offset.y, p.z + offset.z);
         normal.copy(lateral).multiplyScalar(nx).addScaledVector(up, nz);
@@ -276,10 +322,35 @@ function sweptGeometry(chains, profile, withColors, ups) {
   });
 
   const geometry = finishGeometry(positions, normals, quads);
+  if (press) {
+    geometry.computeVertexNormals();
+  }
   if (withColors) {
     geometry.setAttribute('color', new Float32BufferAttribute(colors, 3));
   }
   return geometry;
+}
+
+/** Per-end presses for `sweptGeometry`, or null when strands don't press. */
+function pressing(segments, { halfWidth, halfHeight }, press) {
+  if (!press?.strandIds || !(press.swell > 0)) {
+    return null;
+  }
+  const halfExtent = Math.max(halfWidth, halfHeight);
+  const options = {
+    contact: 2 * halfHeight,
+    apart: 6 * (halfExtent + press.swell * 2 * halfHeight),
+    weight: junctionWeight(press.junctions, 2 * halfExtent, 2 * halfExtent),
+  };
+  const contact = pressAtEnds(segments, press.strandIds, options);
+  const round = press.rounding * halfHeight;
+  return {
+    contact,
+    spread: press.spread > 0 ? pressAtEnds(segments, press.strandIds, { ...options, spread: press.spread }) : contact,
+    swell: press.swell,
+    round,
+    fuse: 0.4 * round,
+  };
 }
 
 /**
@@ -290,10 +361,16 @@ function sweptGeometry(chains, profile, withColors, ups) {
  * segments that join end to start form one smooth tube; tube ends get
  * rounded joints. Optional `colors` (one Color per segment) tint each strut
  * and its joints; the material must then have `vertexColors` on.
+ *
+ * Optional `press` squashes different strands together where they overlap,
+ * roughly as the solid does (see `buildStrutSolid`): { strandIds (per
+ * segment), junctions (flat points where lines meet, which don't press),
+ * swell, rounding, spread } with the last three as in `pressShape`, spread
+ * in scene units.
  */
-export function buildTubeGroup(segments, profile, material, colors = null, ups = null) {
+export function buildTubeGroup(segments, profile, material, colors = null, ups = null, press = null) {
   const chains = traceChains(segments, colors);
-  const tubes = new Mesh(sweptGeometry(chains, profile, Boolean(colors), ups), material);
+  const tubes = new Mesh(sweptGeometry(chains, profile, Boolean(colors), ups, pressing(segments, profile, press)), material);
 
   const joints = [];
   const jointColors = [];
