@@ -243,9 +243,16 @@ designs using *Rotate* or no symmetry are oriented consistently around it.
 - **Strut size:** 2–3 mm round struts, or bands around 2.4 mm wide × 3 mm
   high, print reliably in FDM at 60–80 mm diameter. The woven height of a
   strand follows *Height*, so flat ovals weave more shallowly.
-- **Solid detail** (Quality section): the approximate output triangle edge length. Lower values
-  give smoother struts and bigger files. 1.0 mm is a good default; drop to
-  0.5 mm for a final export.
+- **Solid smoothness** (Quality section): how finely the printable solid is
+  meshed, from 1 (1.6 mm triangles) up; every 3 steps halves the triangle
+  size. 4 (0.8 mm) is a good default; 6–7 for a final export. Each step takes
+  about 1.6× the time and memory, and the note below the slider estimates the
+  triangle count and warns before a setting would run out of browser memory.
+  Where struts touch, the solid always keeps a fillet about one triangle wide,
+  since a perfectly sharp crease comes out sawtoothed at any smoothness.
+- **Line smoothness** (Quality section): points along each line, per triangle
+  edge, as it curves around the sphere. It shapes the preview and the solid
+  alike; above about 16 it rarely changes anything visible.
 
 ### Saving work
 

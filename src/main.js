@@ -47,11 +47,14 @@ import {
   DEFAULT_PRINT,
   crossingBlendMm,
   describeLoop,
+  detailFromSmoothness,
   effectiveBlendMm,
+  estimateSolid,
   gapMode,
   migratePrint,
   pressShape,
   sceneScale,
+  smoothnessFromDetail,
   strutProfile,
   strutWidthMm,
   surfaceInset,
@@ -717,6 +720,7 @@ const rebuildProjectedOverlay = () => {
     templateEditor?.setClearance(null);
   }
   updateLoopNote();
+  updateSolidEstimate();
   updateStrandHighlight({ force: true });
   updateHighlight();
 };
@@ -1512,23 +1516,64 @@ const qualitySection = panel.section('Quality', { open: false });
 qualitySection.slider(params, 'projectionSamples', {
   limits: [2, 128],
   integer: true,
-  label: 'Preview samples',
+  label: 'Line smoothness',
   min: 4,
   max: 32,
   step: 1,
-  hint: 'Points per line when bending it onto the surface.',
+  hint:
+    'Points along each line as it curves around the sphere, per triangle edge. ' +
+    'Shapes both the preview and the solid; above about 16 rarely makes a visible difference.',
   onChange: rebuildPatternOverlay,
 });
-qualitySection.slider(printParams, 'detailMm', {
-  limits: [0.1, 10],
-  label: 'Solid detail',
-  min: 0.3,
-  max: 3,
-  step: 0.1,
-  unit: 'mm',
-  hint: 'Mesh triangle size. Lower is smoother but slower.',
-  onChange: invalidateSolid,
+const solidSmoothness = {
+  get value() {
+    return Number(smoothnessFromDetail(printParams.detailMm).toFixed(1));
+  },
+  set value(smoothness) {
+    printParams.detailMm = Number(detailFromSmoothness(smoothness).toFixed(3));
+  },
+};
+qualitySection.slider(solidSmoothness, 'value', {
+  limits: [1, 10],
+  label: 'Solid smoothness',
+  min: 1,
+  max: 8,
+  step: 1,
+  hint:
+    'How finely the printable solid is meshed. Each step up is smoother but takes about 1.6× ' +
+    'the triangles, time, and memory; very high settings can run out of browser memory.',
+  onChange: () => {
+    invalidateSolid();
+    updateSolidEstimate();
+  },
 });
+const solidEstimateNote = qualitySection.note();
+
+// Browsers give a page about 2–4 GB, and the main thread needs some of it too.
+const SOLID_MEMORY_WARN_BYTES = 1.2e9;
+
+const updateSolidEstimate = () => {
+  const segments = displayedResult?.segments;
+  if (!segments) {
+    solidEstimateNote.set('');
+    return;
+  }
+  let length = 0;
+  for (let i = 0; i < segments.length; i += 6) {
+    length += Math.hypot(segments[i + 3] - segments[i], segments[i + 4] - segments[i + 1], segments[i + 5] - segments[i + 2]);
+  }
+  const { triangles, bytes } = estimateSolid(printParams, (length * printParams.diameterMm) / 2 / RADIUS);
+  const count = triangles >= 1e6 ? `${(triangles / 1e6).toFixed(1)} million` : `${Math.round(triangles / 1e3)}k`;
+  const size = `${printParams.detailMm.toFixed(2)} mm triangles, about ${count} of them`;
+  if (bytes > SOLID_MEMORY_WARN_BYTES) {
+    solidEstimateNote.set(
+      `${size}, needing about ${(bytes / 1e9).toFixed(1)} GB to build. That will likely crash the browser; lower Solid smoothness.`,
+      'warn',
+    );
+  } else {
+    solidEstimateNote.set(`${size}.`);
+  }
+};
 
 const exportBar = panel.group(document.querySelector('#export-bar')).inline();
 const generateButton = exportBar.button({

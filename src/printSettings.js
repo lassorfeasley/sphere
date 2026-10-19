@@ -110,14 +110,47 @@ export const pressShape = (p) => {
 // measured on the strut's thinner side.
 const blendRadiusMm = (p, smoothing) => smoothing * 1.5 * (strutThicknessMm(p) / 2);
 
+// The solid is meshed on a grid, and a sharp crease where struts meet comes
+// out sawtoothed at any grid size, so every fillet where struts touch is at
+// least about one grid cell wide.
+const minFilletMm = (p) => 0.75 * p.detailMm;
+
 // A fillet wider than the crossing gap would bridge it, so cap it there.
-export const effectiveBlendMm = (p) =>
-  gapMode(p) ? Math.min(blendRadiusMm(p, p.jointSmoothing), p.crossingGapMm) : blendRadiusMm(p, p.jointSmoothing);
+export const effectiveBlendMm = (p) => {
+  const blend = Math.max(blendRadiusMm(p, p.jointSmoothing), minFilletMm(p));
+  return gapMode(p) ? Math.min(blend, p.crossingGapMm) : blend;
+};
 
 // The crossing fillet blends lines that merge where they cross. Woven
 // strands pass over and under instead: touching ones meet in a pressed
 // groove, and ones kept a gap apart must not be bridged.
-export const crossingBlendMm = (p) => (weaving(p) ? 0 : blendRadiusMm(p, p.crossingSmoothing));
+export const crossingBlendMm = (p) => {
+  if (gapMode(p)) {
+    return 0;
+  }
+  return Math.max(weaving(p) ? 0 : blendRadiusMm(p, p.crossingSmoothing), minFilletMm(p));
+};
+
+// Solid smoothness 1–10 maps to mesh triangle size: 1.6 mm at 1, halving
+// every 3 steps (each halving makes about 4× the triangles), so 4 is 0.8 mm.
+export const detailFromSmoothness = (smoothness) => 1.6 / 2 ** ((smoothness - 1) / 3);
+export const smoothnessFromDetail = (detailMm) => 1 + 3 * Math.log2(1.6 / detailMm);
+
+// Fitted to generated solids: triangles per (strut surface area / triangle
+// size²), and the peak memory each triangle takes while the mesh is built.
+const TRIANGLES_PER_CELL = 4.5;
+const BYTES_PER_TRIANGLE = 1000;
+
+/**
+ * Rough size of the solid for strands `lengthMm` long in total: triangle
+ * count and peak memory (bytes) while building it.
+ */
+export const estimateSolid = (p, lengthMm) => {
+  const { halfWidth, halfHeight, corner } = strutProfile(p, 1);
+  const perimeter = 4 * (halfWidth + halfHeight) - (8 - 2 * Math.PI) * corner;
+  const triangles = (TRIANGLES_PER_CELL * lengthMm * perimeter) / p.detailMm ** 2;
+  return { triangles, bytes: triangles * BYTES_PER_TRIANGLE };
+};
 
 /**
  * Strut cross-section in scene units (scale = scene units per millimeter): a
