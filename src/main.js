@@ -10,6 +10,7 @@ import {
   LineBasicMaterial,
   LineSegments,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   MOUSE,
   PerspectiveCamera,
@@ -18,6 +19,7 @@ import {
   Raycaster,
   Scene,
   Sphere,
+  SphereGeometry,
   TOUCH,
   Uint32BufferAttribute,
   Vector2,
@@ -55,13 +57,16 @@ import {
   pressShape,
   sceneScale,
   smoothnessFromDetail,
+  solidMeshing,
   strutProfile,
+  strutThicknessMm,
   strutWidthMm,
   surfaceInset,
   weaveOptions,
 } from './printSettings.js';
 import { ControlGroup } from './ui/controls.js';
 import { createProfilePreview } from './ui/profilePreview.js';
+import { PositionRuler } from './ui/positionRuler.js';
 import { icon } from './ui/icons.js';
 import { DEFAULT_SURFACE_COLOR, Gallery, PATTERN_COLOR } from './gallery.js';
 
@@ -100,7 +105,8 @@ camera.position.set(0, 0, 4);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.minDistance = 1.5;
+const MIN_DISTANCE = 1.5;
+controls.minDistance = MIN_DISTANCE;
 controls.maxDistance = 6;
 
 const ambientLight = new AmbientLight(0xf5f5f5, 0.5);
@@ -721,6 +727,7 @@ const rebuildProjectedOverlay = () => {
   }
   updateLoopNote();
   updateSolidEstimate();
+  followCloseUp();
   updateStrandHighlight({ force: true });
   updateHighlight();
 };
@@ -755,11 +762,16 @@ const updateHighlight = () => {
   updateModeVisibility();
 };
 
+// Rounds of evening out the solid's triangles and settling them onto its
+// surface after meshing.
+const SOLID_SETTLE_ROUNDS = 3;
+
 /** Arguments for `buildStrutSolid` from a strand result, in millimeters. */
-const solidArgs = (result, edgeLength) => {
+const solidArgs = (result) => {
   const sphereRadius = printParams.diameterMm / 2;
   const segments = Float32Array.from(result.segments, (v) => (v * sphereRadius) / RADIUS);
   const press = pressShape(printParams);
+  const { gridMm, subdivisions } = solidMeshing(printParams);
   return {
     segments,
     sphereRadius,
@@ -772,7 +784,9 @@ const solidArgs = (result, edgeLength) => {
     pressRounding: press.rounding,
     pressSpread: press.spreadMm,
     junctions: Float32Array.from(result.junctions, (v) => (v * sphereRadius) / RADIUS),
-    edgeLength,
+    edgeLength: gridMm,
+    subdivisions,
+    settleRounds: SOLID_SETTLE_ROUNDS,
   };
 };
 
@@ -811,7 +825,7 @@ const generateSolid = async () => {
   setStatus('Generating solid… you can keep orbiting while it builds.', 'busy');
 
   try {
-    const meshData = await solidWorker.run(solidArgs(displayedResult, printParams.detailMm));
+    const meshData = await solidWorker.run(solidArgs(displayedResult));
     if (!meshData.triangleCount) {
       setStatus('Solid came out empty — try thicker struts or finer detail.', 'warn');
       return;
@@ -873,6 +887,7 @@ const changeDisplayMode = (mode) => {
 };
 
 const resetView = () => {
+  dropCloseUp();
   camera.position.set(0, 0, 4);
   controls.target.set(0, 0, 0);
   sphereGroup.rotation.set(0, 0, 0);
@@ -1237,7 +1252,10 @@ const placeRow = loopGroup.inline();
 const placeLoopButton = placeRow.button({
   label: 'Pick a line',
   icon: 'target',
-  title: 'Click a line on the sphere to put the loop on it, then slide it along with Position',
+  title:
+    'Click a line on the sphere to put the loop on it, then slide it along with Position. ' +
+    'Click near a bead to center the loop exactly on it: yellow beads are crossings, ' +
+    'pink ones are halfway between two crossings.',
   onClick: () => setLoopPicking(!loopPick.active),
 });
 placeRow.button({
@@ -1280,7 +1298,89 @@ loopPositionControl.el.addEventListener('pointerenter', () => setStrandFocus('sl
 loopPositionControl.el.addEventListener('pointerleave', () => setStrandFocus('slider', false));
 loopPositionControl.el.addEventListener('focusin', () => setStrandFocus('sliderFocus', true));
 loopPositionControl.el.addEventListener('focusout', () => setStrandFocus('sliderFocus', false));
+// Dragging, typing in, or arrow-keying the position zooms in on the loop.
+loopPositionControl.el.addEventListener('pointerenter', () => {
+  closeUp.pointerInside = true;
+});
+loopPositionControl.el.addEventListener('pointerleave', () => {
+  closeUp.pointerInside = false;
+  if (closeUp.saved) {
+    endCloseUpSoon();
+  }
+});
+loopPositionControl.el.addEventListener('pointerdown', () => startCloseUp());
+loopPositionControl.el.addEventListener('keydown', (event) => {
+  if (event.key.startsWith('Arrow')) {
+    startCloseUp();
+    endCloseUpSoon();
+  }
+});
+const loopPositionInput = loopPositionControl.el.querySelector('.slider-value input');
+loopPositionInput.addEventListener('focus', () => {
+  closeUp.typing = true;
+  startCloseUp();
+});
+loopPositionInput.addEventListener('blur', () => {
+  closeUp.typing = false;
+  endCloseUpSoon();
+});
 const loopNote = loopGroup.note();
+
+// The big position scale over the viewport, shown while the Hanging section
+// is open. Using it zooms in on the loop, like the panel slider.
+const positionRuler = new PositionRuler(viewport, {
+  onInput: (percent) => {
+    loopPosition.percent = percent;
+    saveSettings();
+    rebuildPatternOverlay();
+  },
+  onActivity: () => {
+    startCloseUp();
+    if (!closeUp.pointerInside) {
+      endCloseUpSoon();
+    }
+  },
+});
+positionRuler.el.addEventListener('pointerenter', () => {
+  closeUp.pointerInside = true;
+  setStrandFocus('slider', true);
+});
+positionRuler.el.addEventListener('pointerleave', () => {
+  closeUp.pointerInside = false;
+  setStrandFocus('slider', false);
+  if (closeUp.saved) {
+    endCloseUpSoon();
+  }
+});
+
+const positionRulerVisible = () =>
+  Boolean(printParams.loop && displayedResult?.loop) &&
+  params.displayMode === 'sphere' &&
+  !hang.groups &&
+  !hangSection.frame.classList.contains('collapsed');
+
+const updatePositionRuler = (loop) => {
+  const result = displayedResult;
+  const toPercent = (f) => f * 100;
+  const own = (stops) => stops.filter((stop) => stop.strandId === loop.strandId).map((stop) => toPercent(stop.along));
+  const crossings = own(result.crossings ?? []);
+  const midpoints = own(result.midpoints ?? []);
+  const named = [...crossings, ...midpoints];
+  const minor = loop.marks
+    .filter(({ major }) => !major)
+    .map(({ value }) => toPercent(value))
+    .filter((value) => !named.some((v) => Math.abs(v - value) < 0.05));
+  positionRuler.setData({
+    value: toPercent(printParams.loopAlong >= 0 ? printParams.loopAlong : loop.along),
+    ticks: [
+      ...crossings.map((value) => ({ value, kind: 'crossing' })),
+      ...midpoints.map((value) => ({ value, kind: 'midpoint' })),
+      ...minor.map((value) => ({ value, kind: 'minor' })),
+    ],
+    bands: loop.free.map((band) => band.map(toPercent)),
+    closed: loop.closed,
+  });
+};
 
 const updateLoopControls = () => loopGroup.show(printParams.loop);
 
@@ -1301,9 +1401,12 @@ const updateLoopNote = () => {
     );
     loopPositionControl.setHint(
       `Along a ${(loop.strandLength / scale).toFixed(0)} mm ${loop.closed ? 'closed ' : ''}line. ` +
-        'Ticks mark crossings and midpoints; shaded stretches fit the loop.',
+        'Long ticks are crossings, short ticks midpoints; both snap. The guide turns green when ' +
+        'the loop is exactly on a crossing or halfway between two. Shaded stretches fit the loop. ' +
+        'For fine placement, use the large scale under the view.',
     );
     loopPositionControl.refresh();
+    updatePositionRuler(loop);
   }
 };
 
@@ -1326,6 +1429,7 @@ const setStrandFocus = (key, value) => {
 
 const updateStrandHighlight = ({ force = false } = {}) => {
   const result = displayedResult;
+  updateLoopGuide();
   let strandId = -1;
   if (loopPick.active) {
     strandId = strandFocus.hovered;
@@ -1366,6 +1470,218 @@ const updateStrandHighlight = ({ force = false } = {}) => {
   sphereGroup.add(strandFocus.mesh);
   updateModeVisibility();
 };
+
+// While the Hanging section is open, a plumb line drops from the top of the
+// loop straight through the sphere's center (the line it hangs along), and
+// beads mark the crossings on the loop's line and the points halfway between
+// them, or those on the hovered line while picking. The line and its bead
+// turn green when the loop sits exactly on one.
+const GUIDE_COLOR = '#ffd166';
+const CENTERED_COLOR = '#5ce08a';
+// Radians between the loop's center and a crossing that still count as on it.
+const CENTERED_ANGLE = 2e-3;
+const guideLineMaterial = new LineBasicMaterial({ color: GUIDE_COLOR, transparent: true, opacity: 0.9, depthTest: false });
+const centeredLineMaterial = guideLineMaterial.clone();
+centeredLineMaterial.color.set(CENTERED_COLOR);
+const guideBeadMaterial = new MeshBasicMaterial({ color: GUIDE_COLOR });
+const midpointBeadMaterial = new MeshBasicMaterial({ color: '#ff7fd0' });
+const centeredBeadMaterial = new MeshBasicMaterial({ color: CENTERED_COLOR });
+const guideBeadGeometry = new SphereGeometry(1, 16, 12);
+const loopGuide = { group: null, result: null, strandId: -1 };
+
+const loopGuideVisible = () =>
+  Boolean(loopGuide.group) &&
+  params.displayMode === 'sphere' &&
+  !hang.groups &&
+  (loopPick.active || !hangSection.frame.classList.contains('collapsed'));
+
+const updateLoopGuide = () => {
+  const result = displayedResult;
+  const loop = printParams.loop ? result?.loop : null;
+  const strandId = loopPick.active && strandFocus.hovered >= 0 ? strandFocus.hovered : loop?.strandId ?? -1;
+  if (result === loopGuide.result && strandId === loopGuide.strandId) {
+    return;
+  }
+  if (loopGuide.group) {
+    sphereGroup.remove(loopGuide.group);
+    loopGuide.group.children.forEach((child) => {
+      if (child.isLineSegments) {
+        child.geometry.dispose();
+      }
+    });
+    loopGuide.group = null;
+  }
+  loopGuide.result = result;
+  loopGuide.strandId = strandId;
+  if (!loop) {
+    return;
+  }
+  const group = new Group();
+  const foot = new Vector3().fromArray(loop.foot);
+  const stops = loopStops(result).filter((stop) => stop.strandId === strandId);
+  const onStop = (stop) => stop.strandId === loop.strandId && new Vector3().fromArray(stop.point).angleTo(foot) < CENTERED_ANGLE;
+  const centered = stops.some(onStop);
+
+  const top = new Vector3().fromArray(loop.top);
+  const above = top.clone().multiplyScalar(1 + 0.08);
+  const line = new LineSegments(
+    new BufferGeometry().setFromPoints([above, new Vector3()]),
+    centered ? centeredLineMaterial : guideLineMaterial,
+  );
+  line.renderOrder = 2;
+  group.add(line);
+
+  const profile = strutProfile(printParams, sceneScale(printParams, RADIUS));
+  const beadRadius = 1.35 * Math.max(profile.halfWidth, profile.halfHeight);
+  stops.forEach((stop) => {
+    const material = onStop(stop) ? centeredBeadMaterial : stop.kind === 'midpoint' ? midpointBeadMaterial : guideBeadMaterial;
+    const bead = new Mesh(guideBeadGeometry, material);
+    bead.position.fromArray(stop.point);
+    bead.scale.setScalar(beadRadius);
+    group.add(bead);
+  });
+  loopGuide.group = group;
+  group.visible = loopGuideVisible();
+  sphereGroup.add(group);
+};
+
+/** Crossings and midpoints between them that the loop can snap to, each with its `kind`. */
+const loopStops = (result) => [
+  ...(result?.crossings ?? []).map((stop) => ({ ...stop, kind: 'crossing' })),
+  ...(result?.midpoints ?? []).map((stop) => ({ ...stop, kind: 'midpoint' })),
+];
+
+// Clicking within this many strut widths of a stop centers the loop on it.
+const STOP_SNAP_WIDTHS = 1.5;
+
+/** The stop on `strandId` nearest `point` (scene units), if within snapping reach. */
+const snapToStop = (strandId, point) => {
+  const reach = STOP_SNAP_WIDTHS * strutWidthMm(printParams) * sceneScale(printParams, RADIUS);
+  let best = null;
+  loopStops(displayedResult).forEach((stop) => {
+    if (stop.strandId !== strandId) {
+      return;
+    }
+    const distance = new Vector3().fromArray(stop.point).distanceTo(point);
+    if (distance < reach && (!best || distance < best.distance)) {
+      best = { ...stop, distance };
+    }
+  });
+  return best;
+};
+
+// While the loop's position is being adjusted, the camera flies in to a
+// close-up of the loop, looking at it face-on, and follows it along its line.
+// Shortly after adjusting stops it flies back to where it was.
+const CLOSE_UP_FLIGHT_MS = 450;
+const CLOSE_UP_FOLLOW_MS = 250;
+const CLOSE_UP_RETURN_MS = 1200;
+const CLOSE_UP_AFTER_PICK_MS = 2500;
+const CLOSE_UP_MIN_DISTANCE = 0.2;
+const closeUp = { saved: null, spinWas: false, flight: null, returnTimer: 0, pointerInside: false, typing: false };
+
+const flyTo = (position, target, duration) => {
+  closeUp.flight = {
+    fromPosition: camera.position.clone(),
+    fromTarget: controls.target.clone(),
+    position,
+    target,
+    start: performance.now(),
+    duration,
+  };
+};
+
+const stepFlight = () => {
+  const { flight } = closeUp;
+  if (!flight) {
+    return;
+  }
+  const t = Math.min(1, (performance.now() - flight.start) / flight.duration);
+  const eased = t * t * (3 - 2 * t);
+  camera.position.lerpVectors(flight.fromPosition, flight.position, eased);
+  controls.target.lerpVectors(flight.fromTarget, flight.target, eased);
+  if (t === 1) {
+    closeUp.flight = null;
+    if (!closeUp.saved) {
+      controls.minDistance = MIN_DISTANCE;
+    }
+  }
+};
+
+/** Camera position and target (world) framing `loop` and a little of its surroundings. */
+const closeUpPose = (loop) => {
+  sphereGroup.updateMatrixWorld();
+  const foot = new Vector3().fromArray(loop.foot).multiplyScalar(RADIUS).applyMatrix4(sphereGroup.matrixWorld);
+  const top = new Vector3().fromArray(loop.top).applyMatrix4(sphereGroup.matrixWorld);
+  const target = foot.clone().lerp(top, 0.4);
+  const outward = foot.clone().sub(sphereGroup.getWorldPosition(new Vector3())).normalize();
+  const side = new Vector3().fromArray(loop.side).transformDirection(sphereGroup.matrixWorld);
+  // Look from whichever face of the loop is nearer the current view.
+  if (side.dot(camera.position.clone().sub(target)) < 0) {
+    side.negate();
+  }
+  const thickness = strutThicknessMm(printParams) * sceneScale(printParams, RADIUS);
+  const distance = Math.max(0.35, 3 * (loop.height + thickness));
+  const direction = outward.addScaledVector(side, 1).normalize();
+  return { position: target.clone().addScaledVector(direction, distance), target };
+};
+
+const startCloseUp = () => {
+  clearTimeout(closeUp.returnTimer);
+  const loop = displayedResult?.loop;
+  if (!loop || params.displayMode !== 'sphere' || hang.groups || closeUp.saved) {
+    return;
+  }
+  closeUp.saved = { position: camera.position.clone(), target: controls.target.clone() };
+  closeUp.spinWas = turntable;
+  setTurntable(false);
+  controls.minDistance = CLOSE_UP_MIN_DISTANCE;
+  const { position, target } = closeUpPose(loop);
+  flyTo(position, target, CLOSE_UP_FLIGHT_MS);
+};
+
+/** Keeps the close-up on the loop after it moves. */
+const followCloseUp = () => {
+  const loop = displayedResult?.loop;
+  if (closeUp.saved && loop) {
+    const { position, target } = closeUpPose(loop);
+    flyTo(position, target, CLOSE_UP_FOLLOW_MS);
+  }
+};
+
+const endCloseUpSoon = (delay = CLOSE_UP_RETURN_MS) => {
+  clearTimeout(closeUp.returnTimer);
+  closeUp.returnTimer = setTimeout(() => {
+    if (!closeUp.saved || closeUp.pointerInside || closeUp.typing) {
+      return;
+    }
+    flyTo(closeUp.saved.position, closeUp.saved.target, CLOSE_UP_FLIGHT_MS);
+    setTurntable(closeUp.spinWas);
+    closeUp.saved = null;
+  }, delay);
+};
+
+/** Leaves the close-up where the camera is, without flying back. */
+const dropCloseUp = () => {
+  clearTimeout(closeUp.returnTimer);
+  closeUp.saved = null;
+  closeUp.flight = null;
+  controls.minDistance = MIN_DISTANCE;
+};
+
+// Orbiting or zooming during a close-up takes over from the flight in
+// progress. The flight back always finishes, so the zoom limit comes back.
+controls.addEventListener('start', () => {
+  if (closeUp.saved) {
+    closeUp.flight = null;
+    clearTimeout(closeUp.returnTimer);
+  }
+});
+controls.addEventListener('end', () => {
+  if (closeUp.saved) {
+    endCloseUpSoon();
+  }
+});
 
 // Picking a line: while picking, the line of the main piece nearest the
 // pointer lights up, and a click (not a drag, which still orbits) puts the
@@ -1468,7 +1784,19 @@ renderer.domElement.addEventListener('pointerup', (event) => {
     return;
   }
   setLoopPicking(false);
-  placeLoop({ anchor: roundAnchor(picked.point.normalize().toArray()), strand: picked.strandId });
+  const stop = snapToStop(picked.strandId, picked.point);
+  if (stop) {
+    placeLoop({
+      anchor: roundAnchor(new Vector3().fromArray(stop.point).normalize().toArray()),
+      strand: picked.strandId,
+      along: stop.along,
+    });
+    setStatus(stop.kind === 'midpoint' ? 'Loop centered between the two crossings.' : 'Loop centered on the crossing.', 'ok');
+  } else {
+    placeLoop({ anchor: roundAnchor(picked.point.normalize().toArray()), strand: picked.strandId });
+  }
+  startCloseUp();
+  endCloseUpSoon(CLOSE_UP_AFTER_PICK_MS);
 });
 
 const hangButton = hangSection.button({
@@ -1537,11 +1865,12 @@ qualitySection.slider(solidSmoothness, 'value', {
   limits: [1, 10],
   label: 'Solid smoothness',
   min: 1,
-  max: 8,
+  max: 10,
   step: 1,
   hint:
     'How finely the printable solid is meshed. Each step up is smoother but takes about 1.6× ' +
-    'the triangles, time, and memory; very high settings can run out of browser memory.',
+    'the triangles and time. From 9 up the mesh is refined onto the exact surface after ' +
+    'meshing, which needs far less memory than meshing that finely outright.',
   onChange: () => {
     invalidateSolid();
     updateSolidEstimate();
@@ -1820,6 +2149,11 @@ const animate = () => {
   }
 
   stepHang();
+  stepFlight();
+  if (loopGuide.group) {
+    loopGuide.group.visible = loopGuideVisible();
+  }
+  positionRuler.show(positionRulerVisible());
   controls.update();
   renderer.render(scene, camera);
 };

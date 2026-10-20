@@ -92,12 +92,15 @@ const weaveFraction = (p) =>
   p.strandsTouch ? 0.5 - 0.2 * p.softness : 0.5 + p.crossingGapMm / (2 * p.heightMm);
 
 // How pressed strands give, from firm (softness 0) to soft (1), so they read
-// as elastic tubes squeezed together rather than solids passing through
+// as inflated tubes squeezed together rather than solids passing through
 // each other: the share of the overlap they bulge sideways by, the rounding
-// of the groove they meet in (strut half-heights), and how far along the
-// strand the squeeze eases out (strut heights). Unwoven strands share one
-// level and would swell at every crossing, so only the weave presses.
-const PRESS = { swell: [0.3, 0.9], rounding: [0.25, 1], spread: [0, 1.5] };
+// of each flat's rim (strut half-heights), and how far along the strand the
+// squeeze eases out (strut heights). The rim stays crisp at any softness,
+// like balloons in a braid: each tube keeps its full round shape right up
+// to the contact line. A rounder rim melts the two into one soft groove.
+// Unwoven strands share one level and would swell at every crossing, so
+// only the weave presses.
+const PRESS = { swell: [0.3, 0.9], rounding: [0.1, 0.4], spread: [0, 1.5] };
 export const pressShape = (p) => {
   if (!(weaving(p) && p.strandsTouch)) {
     return { swell: 0, rounding: 0, spreadMm: 0 };
@@ -110,10 +113,24 @@ export const pressShape = (p) => {
 // measured on the strut's thinner side.
 const blendRadiusMm = (p, smoothing) => smoothing * 1.5 * (strutThicknessMm(p) / 2);
 
+// The level-set grid's memory grows with the cube of its fineness, so below
+// this triangle size the solid is meshed on a grid twice as coarse and every
+// triangle then split in four, the new corners set onto the true surface.
+const SPLIT_BELOW_MM = 0.3;
+
+/** How the solid is meshed: { gridMm, subdivisions } for `buildStrutSolid`. */
+export const solidMeshing = (p) =>
+  p.detailMm < SPLIT_BELOW_MM ? { gridMm: 2 * p.detailMm, subdivisions: 1 } : { gridMm: p.detailMm, subdivisions: 0 };
+
 // The solid is meshed on a grid, and a sharp crease where struts meet comes
 // out sawtoothed at any grid size, so every fillet where struts touch is at
-// least about one grid cell wide.
-const minFilletMm = (p) => 0.75 * p.detailMm;
+// least about one grid cell wide. Round struts part slowly from each other
+// beside the crease, leaving a sliver of air too thin for the grid, so they
+// need a wider fillet than struts with flat sides and tight corners.
+const minFilletMm = (p) => {
+  const roundness = Math.min(Math.max((p.roundness - 0.5) / 0.5, 0), 1);
+  return (0.75 + 0.35 * roundness) * solidMeshing(p).gridMm;
+};
 
 // A fillet wider than the crossing gap would bridge it, so cap it there.
 export const effectiveBlendMm = (p) => {
@@ -122,8 +139,9 @@ export const effectiveBlendMm = (p) => {
 };
 
 // The crossing fillet blends lines that merge where they cross. Woven
-// strands pass over and under instead: touching ones meet in a pressed
-// groove, and ones kept a gap apart must not be bridged.
+// strands pass over and under instead: touching ones press together and
+// stay separate tubes, like balloons in a braid, and ones kept a gap apart
+// must not be bridged.
 export const crossingBlendMm = (p) => {
   if (gapMode(p)) {
     return 0;
@@ -137,9 +155,11 @@ export const detailFromSmoothness = (smoothness) => 1.6 / 2 ** ((smoothness - 1)
 export const smoothnessFromDetail = (detailMm) => 1 + 3 * Math.log2(1.6 / detailMm);
 
 // Fitted to generated solids: triangles per (strut surface area / triangle
-// size²), and the peak memory each triangle takes while the mesh is built.
+// size²), and the peak memory each triangle takes while the grid mesh is
+// built, and while it's split.
 const TRIANGLES_PER_CELL = 4.5;
 const BYTES_PER_TRIANGLE = 1000;
+const BYTES_PER_SPLIT_TRIANGLE = 150;
 
 /**
  * Rough size of the solid for strands `lengthMm` long in total: triangle
@@ -148,8 +168,15 @@ const BYTES_PER_TRIANGLE = 1000;
 export const estimateSolid = (p, lengthMm) => {
   const { halfWidth, halfHeight, corner } = strutProfile(p, 1);
   const perimeter = 4 * (halfWidth + halfHeight) - (8 - 2 * Math.PI) * corner;
-  const triangles = (TRIANGLES_PER_CELL * lengthMm * perimeter) / p.detailMm ** 2;
-  return { triangles, bytes: triangles * BYTES_PER_TRIANGLE };
+  const { gridMm, subdivisions } = solidMeshing(p);
+  const gridTriangles = (TRIANGLES_PER_CELL * lengthMm * perimeter) / gridMm ** 2;
+  // The creases where struts meet are split further, twice on an unsplit
+  // grid mesh and once more on a split one, which adds about a tenth of
+  // the mesh per fourfold split there.
+  const creaseSplits = subdivisions ? 1 : 2;
+  const triangles = gridTriangles * 4 ** subdivisions * (1 + 0.1 * 4 ** creaseSplits);
+  const bytes = Math.max(gridTriangles * BYTES_PER_TRIANGLE, triangles * BYTES_PER_SPLIT_TRIANGLE);
+  return { triangles, bytes };
 };
 
 /**
@@ -216,8 +243,9 @@ export const describeLoop = (p, loop, scale) => {
   const mm = (v) => (v / scale).toFixed(1);
   const angle = Math.round((loop.angle * 180) / Math.PI);
   const thickness = strutThicknessMm(p) * scale;
-  const shape =
-    loop.curl || loop.angle > Math.PI / 2
+  const shape = loop.curl
+    ? `${mm(loop.height)} mm tall, ${mm(2 * loop.topRadius - thickness)} mm round opening.`
+    : loop.angle > Math.PI / 2
       ? `${mm(loop.height)} mm tall, ${mm(2 * loop.topRadius - thickness)} mm opening.`
       : `${mm(loop.height)} mm tall, ${mm(loop.height - thickness)} mm ribbon gap.`;
   const notes = [shape];

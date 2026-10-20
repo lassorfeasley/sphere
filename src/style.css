@@ -928,6 +928,46 @@ body:not(.focus-mode) .toolbar-btn.focus-only {
   pointer-events: none;
 }
 
+.position-ruler {
+  position: absolute;
+  left: 50%;
+  bottom: 58px;
+  z-index: 2;
+  width: min(760px, calc(100% - 28px));
+  transform: translateX(-50%);
+  padding: 8px 12px 6px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: inset 0 0 0 1px var(--border);
+  cursor: ew-resize;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+
+.position-ruler:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.position-ruler canvas {
+  display: block;
+  width: 100%;
+  height: 84px;
+}
+
+.position-ruler-readout {
+  margin-bottom: 4px;
+  text-align: center;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.position-ruler-readout.centered {
+  color: #5ce08a;
+}
+
 .status::before {
   content: '';
   flex: none;

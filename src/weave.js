@@ -25,11 +25,15 @@ const sample = new Vector3();
  * sphere into a hanging loop grown out of the strand itself: an arch a
  * ribbon passes under or, steeper than 90°, a closed ring.
  *
- * Returns { segments, strandIds, ups, loop, pieces, pieceIds }: flat
+ * Returns { segments, strandIds, ups, loop, crossings, pieces, pieceIds }: flat
  * segments [x1, y1, z1, x2, y2, z2, ...], the strand each segment belongs
  * to, the direction each segment's strut height points [x, y, z, ...]
  * (zero means straight out from the sphere; only the loop, which turns
- * away from the sphere, sets it), the loop as placed (see `fitLoop`; null if none), how many separate
+ * away from the sphere, sets it), the loop as placed (see `fitLoop`; null if none),
+ * every crossing on every strand ({ strandId, along: a fraction as for
+ * `loop.along`, point: [x, y, z] on the strand's centerline }), the points
+ * halfway along the strand between neighboring crossings (`midpoints`, the
+ * same shape), how many separate
  * pieces the strands form, and each segment's piece (largest piece first). Strands always join where lines meet at
  * junctions; at crossings they join only if `crossingsTouch`. With
  * `minSeparation` (scene units), strands are sampled at a third of that
@@ -714,9 +718,28 @@ function sampleStrands(
     }
     // Profile x runs along the strand; dividing by the distance from the
     // center keeps horizontal lengths true at every height.
-    const half = fitted.profile.halfLength / radius;
-    const profilePoints = fitted.profile.points;
+    const { profile } = fitted;
+    const half = profile.halfLength / radius;
+    const profilePoints = profile.points;
     const ahead = new Vector3();
+    // A curl's ring sits flat in the plane square to the sphere at its
+    // center, so neither the sphere's curve nor bends in the line warp it.
+    // Below where its legs cross it eases back to following the line.
+    const flat = profile.curl
+      ? (() => {
+          const w = wrap(center);
+          const out = directionAt(w, new Vector3());
+          const forward = directionAt(wrap(center + 1e-4), new Vector3()).sub(out);
+          forward.addScaledVector(out, -forward.dot(out)).normalize();
+          return {
+            out,
+            forward,
+            across: out.clone().cross(forward).normalize(),
+            base: radius + amplitude * heightAt(w),
+            settle: Math.max(profile.crossHeight, 1e-6),
+          };
+        })()
+      : null;
     const loopPoints = profilePoints.map(({ x, y, z = 0 }, i) => {
       const s = center + x / (radius + y);
       const point = at(s, y, z);
@@ -730,6 +753,23 @@ function sampleStrands(
       directionAt(wrap(s + 1e-4), ahead).sub(base);
       ahead.addScaledVector(base, -ahead.dot(base)).normalize();
       point.up = ahead.multiplyScalar(-dy / length).addScaledVector(base, dx / length).normalize().clone();
+      if (flat) {
+        const t = Math.min(1, Math.max(0, y / flat.settle));
+        const weight = t * t * (3 - 2 * t);
+        if (weight > 0) {
+          const along = point.dir.clone().multiplyScalar(radius + point.h);
+          const fixed = flat.out
+            .clone()
+            .multiplyScalar(flat.base + y)
+            .addScaledVector(flat.forward, x)
+            .addScaledVector(flat.across, z);
+          along.lerp(fixed, weight);
+          point.h = along.length() - radius;
+          point.dir = along.normalize();
+          const up = flat.forward.clone().multiplyScalar(-dy / length).addScaledVector(flat.out, dx / length);
+          point.up.lerp(up, weight).normalize();
+        }
+      }
       return point;
     });
     return [
@@ -769,10 +809,12 @@ function sampleStrands(
     const { profile } = fitted;
     const foot = directionAt(fitted.s, new Vector3());
     const top = foot.clone().multiplyScalar(radius + amplitude * heightAt(fitted.s) + profile.height);
+    const ahead = directionAt(wrapAlong(item, fitted.s + 1e-4), new Vector3()).sub(foot);
     const origin = strandOrigin(item);
     placedLoop = {
       top: top.toArray(),
       foot: foot.toArray(),
+      side: foot.clone().cross(ahead).normalize().toArray(),
       height: profile.height,
       angle: profile.angle,
       halfLength: profile.halfLength,
@@ -791,11 +833,26 @@ function sampleStrands(
       free: freeStretches(item, origin, loopFits(item, fitted.clearance, fitted.straight)),
     };
   }
+  const stopsAt = (item, strandId, positions) => {
+    const origin = strandOrigin(item);
+    return positions.map((s) => {
+      const w = wrapAlong(item, s);
+      return {
+        strandId,
+        along: fractionAlong(item, origin, w),
+        point: item.directionAt(w, new Vector3()).multiplyScalar(radius + amplitude * item.heightAt(w)).toArray(),
+      };
+    });
+  };
+  const crossings = prepared.flatMap((item, strandId) => stopsAt(item, strandId, item.strand.crossings.map(({ s }) => s)));
+  const midpoints = prepared.flatMap((item, strandId) => stopsAt(item, strandId, crossingMidpoints(item)));
   return {
     segments: new Float32Array(out),
     strandIds: Uint32Array.from(strandIds),
     ups: new Float32Array(ups),
     loop: placedLoop,
+    crossings,
+    midpoints,
   };
 }
 
@@ -879,12 +936,12 @@ const MAX_CURL_ANGLE = (60 * Math.PI) / 180;
  * above the fillets; there they step sideways (z, across the surface) to
  * pass `neck` apart, centerline to centerline.
  *
- * The path is built from its curvature along its length, which `rounding`
- * (a length) then blurs, so every change of bend (line to fillet, fillet to
- * leg, leg to circle) eases in instead of switching at once. Blurring keeps
- * the total turn, so the curl still lands back on its line, and leaves the
- * middle of the circle exactly round. The circle is sized so the peak meets
- * `height`, but never smaller than `minBend`.
+ * The path is built from its curvature along its length. Over `rounding` (a
+ * length) every change of bend eases in instead of switching at once: the
+ * line into the fillets and the fillets into the legs by blurring, the legs
+ * into the circle along the legs' own length, so the circle stays exactly
+ * round and a rod as wide as its opening fits through. The circle is sized
+ * so the peak meets `height`, but never smaller than `minBend`.
  */
 function curlProfile({ height, angle, minBend, neck, rounding = 0 }, maxStep) {
   const phi = Math.min(Math.max(angle, MIN_CURL_ANGLE), MAX_CURL_ANGLE);
@@ -947,29 +1004,41 @@ function traceCurl(phi, height, minBend, rounding, step) {
   const tangent = { x: radius * sin, y: centerY - radius * cos };
   const leg = Math.hypot(tangent.x - legStart.x, tangent.y - legStart.y);
   const lead = rounding / 2 + 2 * step;
+  const circle = (2 * Math.PI - 2 * phi) * radius;
+  // Legs ease into the circle on their own length rather than by blurring,
+  // which would bend the circle out of round. Each ease turns as much as the
+  // half-length of circle it replaces.
+  const ease = Math.min(rounding, leg, circle / 2);
+  // [length, curvature, curvature at the end if it eases, keeps exact]
   const pieces = [
     [lead, 0],
     [phi * footRadius, 1 / footRadius],
-    [leg, 0],
-    [(2 * Math.PI - 2 * phi) * radius, 1 / radius],
-    [leg, 0],
+    [leg - ease, 0],
+    [ease, 0, 1 / radius, true],
+    [circle - ease, 1 / radius, undefined, true],
+    [ease, 1 / radius, 0, true],
+    [leg - ease, 0],
     [phi * footRadius, 1 / footRadius],
     [lead, 0],
-  ];
+  ].filter(([l]) => l > 0);
   const length = pieces.reduce((sum, [l]) => sum + l, 0);
   const count = Math.ceil(length / step);
   const ds = length / count;
   // Curvature at the middle of each step, spread evenly over pieces.
   const bend = new Float64Array(count);
+  const exact = new Uint8Array(count);
   let piece = 0;
-  let pieceEnd = pieces[0][0];
+  let pieceStart = 0;
   for (let i = 0; i < count; i += 1) {
     const s = (i + 0.5) * ds;
-    while (s > pieceEnd && piece < pieces.length - 1) {
+    while (s > pieceStart + pieces[piece][0] && piece < pieces.length - 1) {
+      pieceStart += pieces[piece][0];
       piece += 1;
-      pieceEnd += pieces[piece][0];
     }
-    bend[i] = pieces[piece][1];
+    const [l, from, to, keep] = pieces[piece];
+    const t = Math.min(1, Math.max(0, (s - pieceStart) / l));
+    bend[i] = to === undefined ? from : from + ((to - from) * (1 - Math.cos(Math.PI * t))) / 2;
+    exact[i] = keep ? 1 : 0;
   }
   const reach = Math.floor(rounding / 2 / ds);
   let smooth = bend;
@@ -977,6 +1046,9 @@ function traceCurl(phi, height, minBend, rounding, step) {
     const window = Array.from({ length: 2 * reach + 1 }, (_, j) => 1 + Math.cos((Math.PI * (j - reach)) / (reach + 1)));
     const sum = window.reduce((a, b) => a + b, 0);
     smooth = bend.map((_, i) => {
+      if (exact[i]) {
+        return bend[i];
+      }
       let total = 0;
       for (let j = -reach; j <= reach; j += 1) {
         const k = Math.min(count - 1, Math.max(0, i + j));
@@ -987,7 +1059,8 @@ function traceCurl(phi, height, minBend, rounding, step) {
   }
 
   // Steps never line up exactly with the pieces, so scale the turn back to
-  // one full revolution; otherwise the far foot misses the line.
+  // one full revolution; otherwise the far foot misses the line. Scaling
+  // every bend alike keeps the circle a circle.
   const turned = smooth.reduce((sum, k) => sum + k * ds, 0);
   const raw = [{ x: 0, y: 0 }];
   let heading = 0;
@@ -1037,7 +1110,7 @@ function traceCurl(phi, height, minBend, rounding, step) {
     points,
     halfLength: points[points.length - 1].x,
     peak: Math.max(...points.map((p) => p.y)),
-    radius,
+    radius: (radius * turned) / (2 * Math.PI),
     crossAt,
     crossHeight,
     total,
@@ -1292,12 +1365,15 @@ function strandMarks(item, origin) {
   const spans = sorted.length - 1;
   for (let i = 0; i < spans; i += 1) {
     const [a, b] = [sorted[i].f, sorted[i + 1].f];
-    const parts = spans <= 2 ? [0.25, 0.5, 0.75] : [0.5];
+    // Between two crossings, `crossingMidpoints` marks the true middle.
+    const betweenCrossings = sorted[i].stop && sorted[i + 1].stop;
+    const parts = (spans <= 2 ? [0.25, 0.5, 0.75] : [0.5]).filter((u) => !(betweenCrossings && u === 0.5));
     parts.forEach((u) => marks.push({ value: a + (b - a) * u, major: false }));
   }
   if (!strand.closed) {
     marks.push({ value: 0.5, major: true });
   }
+  crossingMidpoints(item).forEach((s) => marks.push({ value: fractionAlong(item, origin, s), major: false }));
   const unique = [];
   marks
     .sort((a, b) => a.value - b.value || Number(b.major) - Number(a.major))
@@ -1310,6 +1386,20 @@ function strandMarks(item, origin) {
       }
     });
   return unique;
+}
+
+/**
+ * Positions (radians along the strand, possibly past its length on a closed
+ * strand) halfway between neighboring crossings, skipping crossings close
+ * enough to share a slider stop.
+ */
+function crossingMidpoints({ strand, length }) {
+  const s = strand.crossings.map((c) => c.s).sort((a, b) => a - b);
+  const pairs = s.slice(1).map((b, i) => [s[i], b]);
+  if (strand.closed && s.length > 0) {
+    pairs.push([s[s.length - 1], s[0] + length]);
+  }
+  return pairs.filter(([a, b]) => b - a >= MARK_MERGE * length).map(([a, b]) => (a + b) / 2);
 }
 
 /** Stretches of the strand where the loop fits, as [from, to] fractions from `origin`. */

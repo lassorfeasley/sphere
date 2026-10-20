@@ -85,6 +85,296 @@ function separateTouchingVertices(vertProperties, triVerts, numProp, distance) {
 }
 
 /**
+ * Vertex neighbors from a triangle list, as CSR arrays { start, list }:
+ * the neighbors of v are list[start[v]] .. list[start[v + 1] - 1].
+ */
+function vertexNeighbors(vertexCount, triVerts) {
+  const count = new Uint32Array(vertexCount + 1);
+  for (let t = 0; t < triVerts.length; t += 1) {
+    count[triVerts[t] + 1] += 2;
+  }
+  for (let v = 0; v < vertexCount; v += 1) {
+    count[v + 1] += count[v];
+  }
+  const list = new Uint32Array(count[vertexCount]);
+  const fill = count.slice(0, vertexCount);
+  for (let t = 0; t < triVerts.length; t += 3) {
+    for (let k = 0; k < 3; k += 1) {
+      const v = triVerts[t + k];
+      list[fill[v]++] = triVerts[t + ((k + 1) % 3)];
+      list[fill[v]++] = triVerts[t + ((k + 2) % 3)];
+    }
+  }
+  // Each neighbor shows up twice (once per shared triangle), which weights
+  // them all alike.
+  return { start: count, list };
+}
+
+/**
+ * Split the marked triangles (all of them when `marked` is null) into four
+ * at their edge midpoints. A neighbor sharing one or two split edges is cut
+ * into two or three, so the mesh stays closed with no hanging vertices.
+ * Returns the new mesh and which vertices belong to a split triangle.
+ */
+function subdivide(positions, triVerts, marked = null) {
+  const vertexCount = positions.length / 3;
+  const midpoints = new Map();
+  const added = [];
+  const edgeKey = (a, b) => (a < b ? a * vertexCount + b : b * vertexCount + a);
+  const split = (a, b) => {
+    const key = edgeKey(a, b);
+    let index = midpoints.get(key);
+    if (index === undefined) {
+      index = vertexCount + added.length / 3;
+      midpoints.set(key, index);
+      for (let k = 0; k < 3; k += 1) {
+        added.push((positions[a * 3 + k] + positions[b * 3 + k]) / 2);
+      }
+    }
+    return index;
+  };
+  for (let t = 0; t < triVerts.length; t += 3) {
+    if (!marked || marked[t / 3]) {
+      split(triVerts[t], triVerts[t + 1]);
+      split(triVerts[t + 1], triVerts[t + 2]);
+      split(triVerts[t + 2], triVerts[t]);
+    }
+  }
+  const out = new Float64Array(positions.length + added.length);
+  out.set(positions);
+  out.set(added, positions.length);
+  const touched = new Uint8Array(out.length / 3);
+  const distanceSq = (a, b) => {
+    const dx = out[a * 3] - out[b * 3];
+    const dy = out[a * 3 + 1] - out[b * 3 + 1];
+    const dz = out[a * 3 + 2] - out[b * 3 + 2];
+    return dx * dx + dy * dy + dz * dz;
+  };
+  // A triangle with n split edges becomes n + 1 triangles.
+  const triangleCount = triVerts.length / 3;
+  const splitEdges = new Uint8Array(triangleCount);
+  let total = 0;
+  for (let t = 0; t < triangleCount; t += 1) {
+    for (let k = 0; k < 3; k += 1) {
+      if (midpoints.has(edgeKey(triVerts[t * 3 + k], triVerts[t * 3 + ((k + 1) % 3)]))) {
+        splitEdges[t] += 1;
+      }
+    }
+    total += splitEdges[t] + 1;
+  }
+  const tris = new Uint32Array(total * 3);
+  let at = 0;
+  const emit = (...corners) => {
+    tris.set(corners, at);
+    at += corners.length;
+    corners.forEach((v) => {
+      touched[v] = 1;
+    });
+  };
+  for (let t = 0; t < triVerts.length; t += 3) {
+    const splitCount = splitEdges[t / 3];
+    if (splitCount === 0) {
+      tris.set(triVerts.subarray(t, t + 3), at);
+      at += 3;
+      continue;
+    }
+    let corners = [triVerts[t], triVerts[t + 1], triVerts[t + 2]];
+    let mids = corners.map((v, k) => midpoints.get(edgeKey(v, corners[(k + 1) % 3])));
+    // Turn the triangle so its split edges come first (keeping its winding).
+    while (mids[0] === undefined || (splitCount === 2 && mids[1] === undefined)) {
+      corners = [corners[1], corners[2], corners[0]];
+      mids = [mids[1], mids[2], mids[0]];
+    }
+    const [a, b, c] = corners;
+    const [ab, bc, ca] = mids;
+    if (splitCount === 3) {
+      emit(a, ab, ca, ab, b, bc, ca, bc, c, ab, bc, ca);
+    } else if (splitCount === 1) {
+      emit(a, ab, c, ab, b, c);
+    } else if (distanceSq(a, bc) < distanceSq(ab, c)) {
+      emit(b, bc, ab, a, ab, bc, a, bc, c);
+    } else {
+      emit(b, bc, ab, a, ab, c, ab, bc, c);
+    }
+  }
+  return { positions: out, triVerts: tris, touched };
+}
+
+/**
+ * Settle a level-set mesh onto its surface: each round evens out the
+ * triangles (moving every vertex toward its neighbors' middle, along the
+ * surface only) and then puts every vertex back on the surface with Newton
+ * steps along the field's gradient. Even triangles lying exactly on the
+ * surface shade smoothly, where the grid's interpolated vertices zigzag
+ * across tight creases. `sdf(x, y, z)` is positive inside. Only the
+ * `movable` vertices move when given. After each vertex is measured,
+ * `inCrease()` tells whether the field there is a crease, and that goes into
+ * `creaseFlags` when given.
+ */
+function settleOnSurface(positions, triVerts, sdf, { step, rounds, movable = null, inCrease = null, creaseFlags = null }) {
+  const vertexCount = positions.length / 3;
+  const { start, list } = vertexNeighbors(vertexCount, triVerts);
+  // Where two parts of the surface touch, separate vertices share a spot;
+  // moved apart, they could pass through each other, so they stay put.
+  const pinned = new Uint8Array(vertexCount);
+  const firstAt = new Map();
+  for (let v = 0; v < vertexCount; v += 1) {
+    const key = `${positions[v * 3]},${positions[v * 3 + 1]},${positions[v * 3 + 2]}`;
+    const first = firstAt.get(key);
+    if (first === undefined) {
+      firstAt.set(key, v);
+    } else {
+      pinned[first] = 1;
+      pinned[v] = 1;
+    }
+    if (movable && !movable[v]) {
+      pinned[v] = 1;
+    }
+  }
+  firstAt.clear();
+  const h = step * 0.05;
+  const gradient = [0, 0, 0];
+  // The gradient found while projecting a vertex is kept for the next
+  // round's evening out, which saves measuring the field again there.
+  const known = new Float64Array(vertexCount * 3);
+  const hasKnown = new Uint8Array(vertexCount);
+  const gradientAt = (x, y, z, f) => {
+    gradient[0] = (sdf(x + h, y, z) - f) / h;
+    gradient[1] = (sdf(x, y + h, z) - f) / h;
+    gradient[2] = (sdf(x, y, z + h) - f) / h;
+    return gradient[0] * gradient[0] + gradient[1] * gradient[1] + gradient[2] * gradient[2];
+  };
+  const normalOf = (p, t, out) => {
+    const [a, b, c] = [triVerts[t] * 3, triVerts[t + 1] * 3, triVerts[t + 2] * 3];
+    const [ux, uy, uz] = [p[b] - p[a], p[b + 1] - p[a + 1], p[b + 2] - p[a + 2]];
+    const [wx, wy, wz] = [p[c] - p[a], p[c + 1] - p[a + 1], p[c + 2] - p[a + 2]];
+    out[0] = uy * wz - uz * wy;
+    out[1] = uz * wx - ux * wz;
+    out[2] = ux * wy - uy * wx;
+    return out;
+  };
+  const [n0, n1] = [[0, 0, 0], [0, 0, 0]];
+  const project = (v) => {
+    if (pinned[v]) {
+      return;
+    }
+    const o = v * 3;
+    for (let i = 0; i < 3; i += 1) {
+      const [x, y, z] = [positions[o], positions[o + 1], positions[o + 2]];
+      const f = sdf(x, y, z);
+      if (creaseFlags) {
+        creaseFlags[v] = inCrease() ? 1 : 0;
+      }
+      if (Math.abs(f) < step * 1e-3) {
+        return;
+      }
+      const lengthSq = gradientAt(x, y, z, f);
+      if (!(lengthSq > 1e-12)) {
+        return;
+      }
+      known.set(gradient, o);
+      hasKnown[v] = 1;
+      // Never farther than a step, in case the field is rough there.
+      let scale = f / lengthSq;
+      const move = Math.abs(scale) * Math.sqrt(lengthSq);
+      if (move > step) {
+        scale *= step / move;
+      }
+      positions[o] -= scale * gradient[0];
+      positions[o + 1] -= scale * gradient[1];
+      positions[o + 2] -= scale * gradient[2];
+    }
+  };
+  const next = new Float64Array(positions.length);
+  const before = new Float64Array(positions.length);
+  // Any triangle the round turned over (or squashed flat) goes back to
+  // where it was, so settling never folds the surface onto itself. Its
+  // corners first get another try without the evening out, which is what
+  // usually turns triangles over in tight creases.
+  const undone = new Uint8Array(vertexCount);
+  const flipped = (t) => {
+    normalOf(before, t, n0);
+    normalOf(positions, t, n1);
+    const was = Math.hypot(...n0);
+    const now = Math.hypot(...n1);
+    return !(n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2] > 0 && now > 0.05 * was);
+  };
+  const undoFlips = () => {
+    undone.fill(0);
+    for (let pass = 0; pass < 4; pass += 1) {
+      let undoneCount = 0;
+      for (let t = 0; t < triVerts.length; t += 3) {
+        if (!flipped(t)) {
+          continue;
+        }
+        for (let k = 0; k < 3; k += 1) {
+          const v = triVerts[t + k];
+          const o = v * 3;
+          if (positions[o] !== before[o] || positions[o + 1] !== before[o + 1] || positions[o + 2] !== before[o + 2]) {
+            positions[o] = before[o];
+            positions[o + 1] = before[o + 1];
+            positions[o + 2] = before[o + 2];
+            if (pass === 0 && !undone[v]) {
+              undone[v] = 1;
+              project(v);
+            }
+            undoneCount += 1;
+          }
+        }
+      }
+      if (!undoneCount) {
+        return;
+      }
+    }
+  };
+  for (let round = 0; round < rounds; round += 1) {
+    before.set(positions);
+    for (let v = 0; v < vertexCount; v += 1) {
+      const o = v * 3;
+      const [x, y, z] = [positions[o], positions[o + 1], positions[o + 2]];
+      if (pinned[v]) {
+        next[o] = x;
+        next[o + 1] = y;
+        next[o + 2] = z;
+        continue;
+      }
+      let [cx, cy, cz] = [0, 0, 0];
+      const n = start[v + 1] - start[v];
+      for (let j = start[v]; j < start[v + 1]; j += 1) {
+        const u = list[j] * 3;
+        cx += positions[u];
+        cy += positions[u + 1];
+        cz += positions[u + 2];
+      }
+      let [dx, dy, dz] = n ? [cx / n - x, cy / n - y, cz / n - z] : [0, 0, 0];
+      let lengthSq;
+      if (hasKnown[v]) {
+        gradient[0] = known[o];
+        gradient[1] = known[o + 1];
+        gradient[2] = known[o + 2];
+        lengthSq = gradient[0] * gradient[0] + gradient[1] * gradient[1] + gradient[2] * gradient[2];
+      } else {
+        lengthSq = gradientAt(x, y, z, sdf(x, y, z));
+      }
+      if (lengthSq > 1e-12) {
+        const along = (dx * gradient[0] + dy * gradient[1] + dz * gradient[2]) / lengthSq;
+        dx -= along * gradient[0];
+        dy -= along * gradient[1];
+        dz -= along * gradient[2];
+      }
+      next[o] = x + 0.5 * dx;
+      next[o + 1] = y + 0.5 * dy;
+      next[o + 2] = z + 0.5 * dz;
+    }
+    positions.set(next);
+    for (let v = 0; v < vertexCount; v += 1) {
+      project(v);
+    }
+    undoFlips();
+  }
+}
+
+/**
  * Build a watertight strut lattice from a set of line segments.
  *
  * Every segment becomes a strut with a rounded-rectangle cross-section
@@ -134,6 +424,8 @@ export async function buildStrutSolid({
   pressSpread = 0,
   junctions = null,
   edgeLength,
+  settleRounds = 0,
+  subdivisions = 0,
 }) {
   const wasm = await getManifoldModule();
   const { Manifold } = wasm;
@@ -213,26 +505,67 @@ export async function buildStrutSolid({
       });
     }
   }
-  const strutDistance = (px, py, pz, s) => {
+  // Each segment is straight, so where a strand bends the square-cut ends
+  // of neighboring segments meet at an angle, and the joined struts have a
+  // dent or ridge at every joint: a bending strand comes out ribbed. So each
+  // segment is instead cut by a plane square to a tangent that turns
+  // smoothly from one segment to the next, shared by both at each joint: a
+  // point's place along the segment is where that plane passes through it.
+  // Past a free end the whole offset counts, which caps the end with the
+  // profile spun around. Past a joint the strut ends flat in the shared
+  // plane and the neighbor's own measure takes over there: a spun cap would
+  // poke out of a strand that runs at a slant to its profile's height axis,
+  // bulging at every joint.
+  const directions = new Float64Array(segmentCount * 3);
+  for (let s = 0; s < segmentCount; s += 1) {
     const o = s * 6;
-    const ax = segments[o];
-    const ay = segments[o + 1];
-    const az = segments[o + 2];
-    const dx = segments[o + 3] - ax;
-    const dy = segments[o + 4] - ay;
-    const dz = segments[o + 5] - az;
-    const lengthSq = dx * dx + dy * dy + dz * dz;
-    let t = 0;
-    if (lengthSq > 0) {
-      t = ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / lengthSq;
-      t = Math.max(0, Math.min(1, t));
+    const d = [segments[o + 3] - segments[o], segments[o + 4] - segments[o + 1], segments[o + 5] - segments[o + 2]];
+    const length = Math.hypot(...d) || 1;
+    directions.set(d.map((v) => v / length), s * 3);
+  }
+  const meets = (a, b) => {
+    const [i, j] = [a * 6 + 3, b * 6];
+    return Math.hypot(segments[i] - segments[j], segments[i + 1] - segments[j + 1], segments[i + 2] - segments[j + 2]) < 1e-6;
+  };
+  // Per segment: the joined segment before and after it (or -1), and the
+  // smoothed tangent at its start and end.
+  const neighbors = new Int32Array(segmentCount * 2).fill(-1);
+  const tangents = new Float64Array(segmentCount * 6);
+  for (let s = 0; s < segmentCount; s += 1) {
+    if (s > 0 && meets(s - 1, s)) {
+      neighbors[s * 2] = s - 1;
     }
-    const qx = ax + dx * t;
-    const qy = ay + dy * t;
-    const qz = az + dz * t;
-    const ox = px - qx;
-    const oy = py - qy;
-    const oz = pz - qz;
+    if (s + 1 < segmentCount && meets(s, s + 1)) {
+      neighbors[s * 2 + 1] = s + 1;
+    }
+  }
+  // A closed strand's last segment joins its first.
+  if (strandIds) {
+    const firstOf = new Map();
+    strandIds.forEach((strand, s) => {
+      if (!firstOf.has(strand)) {
+        firstOf.set(strand, s);
+      }
+      const first = firstOf.get(strand);
+      if (s > first && (s + 1 === segmentCount || strandIds[s + 1] !== strand) && meets(s, first)) {
+        neighbors[s * 2 + 1] = first;
+        neighbors[first * 2] = s;
+      }
+    });
+  }
+  for (let s = 0; s < segmentCount; s += 1) {
+    for (let end = 0; end < 2; end += 1) {
+      const other = neighbors[s * 2 + end];
+      const sum = [0, 1, 2].map((k) => directions[s * 3 + k] + (other >= 0 ? directions[other * 3 + k] : directions[s * 3 + k]));
+      const length = Math.hypot(...sum);
+      sum.forEach((v, k) => {
+        tangents[s * 6 + end * 3 + k] = length > 1e-9 ? v / length : directions[s * 3 + k];
+      });
+    }
+  }
+  // Signed distance from the profile of segment s for an offset o from the
+  // point q on its axis.
+  const profileDistance = (ox, oy, oz, qx, qy, qz, s) => {
     const offsetSq = ox * ox + oy * oy + oz * oz;
     if (round) {
       return Math.sqrt(offsetSq) - corner;
@@ -245,6 +578,60 @@ export async function buildStrutSolid({
     const cx = ux > 0 ? ux : 0;
     const cz = uz > 0 ? uz : 0;
     return Math.sqrt(cx * cx + cz * cz) + Math.min(ux > uz ? ux : uz, 0) - corner;
+  };
+
+  const strutDistance = (px, py, pz, s) => {
+    const o = s * 6;
+    const ax = segments[o];
+    const ay = segments[o + 1];
+    const az = segments[o + 2];
+    const dx = segments[o + 3] - ax;
+    const dy = segments[o + 4] - ay;
+    const dz = segments[o + 5] - az;
+    const lengthSq = dx * dx + dy * dy + dz * dz;
+    const wx = px - ax;
+    const wy = py - ay;
+    const wz = pz - az;
+    let t = 0;
+    if (lengthSq > 0) {
+      // Solve (w - t d) . (T0 + t (T1 - T0)) = 0 for t, the place along the
+      // segment whose sweep plane holds the point. Of the two roots, the
+      // one that becomes the straight projection as the tangents agree.
+      const ex = tangents[o + 3] - tangents[o];
+      const ey = tangents[o + 4] - tangents[o + 1];
+      const ez = tangents[o + 5] - tangents[o + 2];
+      const straight = dx * tangents[o] + dy * tangents[o + 1] + dz * tangents[o + 2];
+      const quadratic = -(dx * ex + dy * ey + dz * ez);
+      const linear = wx * ex + wy * ey + wz * ez - straight;
+      const constant = wx * tangents[o] + wy * tangents[o + 1] + wz * tangents[o + 2];
+      const discriminant = linear * linear - 4 * quadratic * constant;
+      if (Math.abs(quadratic) < 1e-12 * lengthSq || discriminant < 0) {
+        t = linear !== 0 ? -constant / linear : (wx * dx + wy * dy + wz * dz) / lengthSq;
+      } else {
+        const q = -0.5 * (linear + (linear < 0 ? -1 : 1) * Math.sqrt(discriminant));
+        t = q !== 0 ? constant / q : -constant / linear;
+      }
+    }
+    const end = t < 0 ? 0 : t > 1 ? 1 : -1;
+    t = Math.max(0, Math.min(1, t));
+    const qx = ax + dx * t;
+    const qy = ay + dy * t;
+    const qz = az + dz * t;
+    const ox = px - qx;
+    const oy = py - qy;
+    const oz = pz - qz;
+    if (end >= 0 && neighbors[s * 2 + end] >= 0) {
+      const k = o + end * 3;
+      const h = ox * tangents[k] + oy * tangents[k + 1] + oz * tangents[k + 2];
+      // Only once truly beyond the joint plane; a point the sweep planes
+      // fold past on the inside of a tight bend keeps the spun cap, which
+      // is what fills a bend tighter than the strut is thick.
+      if (end === 1 ? h > 0 : h < 0) {
+        const face = profileDistance(ox - h * tangents[k], oy - h * tangents[k + 1], oz - h * tangents[k + 2], qx, qy, qz, s);
+        return face > 0 ? Math.sqrt(face * face + h * h) : Math.abs(h);
+      }
+    }
+    return profileDistance(ox, oy, oz, qx, qy, qz, s);
   };
 
   // Beyond the margin the exact value doesn't matter, only its sign.
@@ -339,15 +726,33 @@ export async function buildStrutSolid({
 
   // How far strut `s` bulges at a point. The displaced material goes
   // sideways: nothing toward or away from the strut it presses on.
-  const pressSwellAt = (x, y, z, s) => {
+  const alongSegment = (x, y, z, s) => {
     const o = s * 6;
     const dx = segments[o + 3] - segments[o];
     const dy = segments[o + 4] - segments[o + 1];
     const dz = segments[o + 5] - segments[o + 2];
     const lengthSq = dx * dx + dy * dy + dz * dz;
-    const t = lengthSq > 0
-      ? Math.min(Math.max(((x - segments[o]) * dx + (y - segments[o + 1]) * dy + (z - segments[o + 2]) * dz) / lengthSq, 0), 1)
-      : 0;
+    return lengthSq > 0 ? ((x - segments[o]) * dx + (y - segments[o + 1]) * dy + (z - segments[o + 2]) * dz) / lengthSq : 0;
+  };
+  const pressSwellAt = (x, y, z, nearest) => {
+    // Near a bend the nearest strut can be one whose end the point lies
+    // past; read the press from the strut the point lies alongside, or the
+    // swell steps where the nearest one changes.
+    let s = nearest;
+    let t = alongSegment(x, y, z, s);
+    if (t > 1 && s + 1 < segmentCount && strandIds[s + 1] === strandIds[s]) {
+      s += 1;
+      t = alongSegment(x, y, z, s);
+    } else if (t < 0 && s > 0 && strandIds[s - 1] === strandIds[s]) {
+      s -= 1;
+      t = alongSegment(x, y, z, s);
+    }
+    t = Math.min(Math.max(t, 0), 1);
+    const o = s * 6;
+    const dx = segments[o + 3] - segments[o];
+    const dy = segments[o + 4] - segments[o + 1];
+    const dz = segments[o + 5] - segments[o + 2];
+    const lengthSq = dx * dx + dy * dy + dz * dz;
     const p = s * 8;
     // A Catmull-Rom curve through the neighboring segments' ends keeps the
     // bulge free of creases at segment joints.
@@ -359,9 +764,17 @@ export async function buildStrutSolid({
     if (depth <= 0) {
       return 0;
     }
-    const ox = x - segments[o] - dx * t;
-    const oy = y - segments[o + 1] - dy * t;
-    const oz = z - segments[o + 2] - dz * t;
+    // Square to the strand, so past a segment's end (where the next one
+    // takes over) the offset doesn't tilt along it and the swell matches.
+    let ox = x - segments[o] - dx * t;
+    let oy = y - segments[o + 1] - dy * t;
+    let oz = z - segments[o + 2] - dz * t;
+    if (lengthSq > 0) {
+      const axial = (ox * dx + oy * dy + oz * dz) / lengthSq;
+      ox -= axial * dx;
+      oy -= axial * dy;
+      oz -= axial * dz;
+    }
     const nx = pressAtEnds[p + 1] + (pressAtEnds[p + 5] - pressAtEnds[p + 1]) * t;
     const ny = pressAtEnds[p + 2] + (pressAtEnds[p + 6] - pressAtEnds[p + 2]) * t;
     const nz = pressAtEnds[p + 3] + (pressAtEnds[p + 7] - pressAtEnds[p + 3]) * t;
@@ -398,10 +811,15 @@ export async function buildStrutSolid({
   });
   const bucketDistances = new Float64Array(maxBucket);
 
+  // Whether the last point measured lies in a crease: within reach of the
+  // fillet or pressed rim where two struts meet.
+  let creaseHere = false;
+
   // Nearest strut distance blended with the nearest one that isn't part of
   // the same stretch of tube, each first pressed against the other, then
   // joined with a polynomial smooth-min.
   const blendedStrandDistance = (x, y, z) => {
+    creaseHere = false;
     const bucket = grid.get(cellKey(cellIndex(x), cellIndex(y), cellIndex(z)));
     if (!bucket) {
       return farDistance;
@@ -444,6 +862,9 @@ export async function buildStrutSolid({
       }
     }
     const k = blendAt(x, y, z, weight);
+    // The fillet reaches where the struts are within `k` of each other, the
+    // rim's rounding where they are within 1.2 of its radius.
+    creaseHere = b - a < 1.25 * Math.max(k, 1.2 * weight * pressRound);
     if (!(k > 0) || b - a >= k) {
       return a;
     }
@@ -465,6 +886,7 @@ export async function buildStrutSolid({
   const latticeSdf = (x, y, z, r) => {
     const shellDistance = Math.max(minRadius - r, r - maxRadius, 0);
     if (shellDistance > sdfMargin) {
+      creaseHere = false;
       return halfExtent - shellDistance;
     }
     return -(blend ? blendedStrandDistance(x, y, z) : nearestStrutDistance(x, y, z));
@@ -480,14 +902,62 @@ export async function buildStrutSolid({
 
   const manifold = Manifold.levelSet(sdf, bounds, edgeLength);
   const mesh = manifold.getMesh();
-  separateTouchingVertices(mesh.vertProperties, mesh.triVerts, mesh.numProp, TOUCH_SEPARATION_MM);
-  const result = {
-    numProp: mesh.numProp,
-    vertProperties: mesh.vertProperties,
-    triVerts: mesh.triVerts,
-    triangleCount: mesh.triVerts.length / 3,
-    vertexCount: mesh.vertProperties.length / mesh.numProp,
-  };
   manifold.delete();
-  return result;
+  let positions = new Float64Array(mesh.vertProperties.length / mesh.numProp * 3);
+  for (let v = 0; v < positions.length / 3; v += 1) {
+    positions.set(mesh.vertProperties.subarray(v * mesh.numProp, v * mesh.numProp + 3), v * 3);
+  }
+  let triVerts = mesh.triVerts;
+  const field = (x, y, z) => latticeSdf(x, y, z, Math.sqrt(x * x + y * y + z * z));
+  // Settling only the final mesh is both quicker and smoother than also
+  // settling the grid mesh before splitting it.
+  let step = edgeLength;
+  for (let i = 0; i < subdivisions; i += 1) {
+    ({ positions, triVerts } = subdivide(positions, triVerts));
+    step /= 2;
+  }
+  // The fillets and pressed rims where struts meet are narrower than the
+  // triangles, so the mesh zigzags across them however fine the grid. Split
+  // the triangles in those creases, and only those, until they are a few
+  // per fillet, settling the new ones onto the surface each time.
+  const finestFillet = Math.min(...[blendRadius, crossingBlendRadius].filter((radius) => radius > 0));
+  let creaseLevels = 0;
+  for (let spacing = step; blend && settleRounds > 0 && creaseLevels < 2 && spacing > finestFillet / 2.5; spacing /= 2) {
+    creaseLevels += 1;
+  }
+  let creaseFlags = settleRounds > 0 && creaseLevels > 0 ? new Uint8Array(positions.length / 3) : null;
+  const inCrease = () => creaseHere;
+  if (settleRounds > 0) {
+    settleOnSurface(positions, triVerts, field, { step, rounds: settleRounds, inCrease, creaseFlags });
+  }
+  for (let level = 0; level < creaseLevels; level += 1) {
+    const marked = new Uint8Array(triVerts.length / 3);
+    let any = false;
+    for (let t = 0; t < triVerts.length; t += 3) {
+      if (creaseFlags[triVerts[t]] || creaseFlags[triVerts[t + 1]] || creaseFlags[triVerts[t + 2]]) {
+        marked[t / 3] = 1;
+        any = true;
+      }
+    }
+    if (!any) {
+      break;
+    }
+    let touched;
+    ({ positions, triVerts, touched } = subdivide(positions, triVerts, marked));
+    step /= 2;
+    const flags = new Uint8Array(positions.length / 3);
+    flags.set(creaseFlags);
+    creaseFlags = flags;
+    settleOnSurface(positions, triVerts, field, { step, rounds: settleRounds, movable: touched, inCrease, creaseFlags });
+  }
+  const vertProperties = Float32Array.from(positions);
+  separateTouchingVertices(vertProperties, triVerts, 3, TOUCH_SEPARATION_MM);
+  return {
+    numProp: 3,
+    vertProperties,
+    triVerts,
+    triangleCount: triVerts.length / 3,
+    vertexCount: vertProperties.length / 3,
+    ...(globalThis.process?.env?.SOLID_DEBUG ? { field } : {}),
+  };
 }
